@@ -23,16 +23,18 @@ class CheckTests(unittest.TestCase):
             {"id": 22, "date_iso8601": "2026-10-24T11:15:00+03:00", "tickets_left": 1, "unavaliable": False},
             {"id": 23, "date_iso8601": "2026-11-03T11:15:00+03:00", "tickets_left": 0, "unavaliable": False},
             {"id": 24, "date_iso8601": "2026-11-04T11:15:00+03:00", "tickets_left": 1, "unavaliable": True},
+            {"id": 25, "date_iso8601": "2026-11-05T16:30:00+03:00", "tickets_left": None,
+             "tickets_limited": False, "unavaliable": False},
         ]
         result = check.parse_event(page(3558805, True, entries), 3558805, now)
-        self.assertEqual([slot["id"] for slot in result["slots"]], ["21", "20"])
+        self.assertEqual([slot["id"] for slot in result["slots"]], ["21", "20", "25"])
         self.assertEqual(result["slots"][0]["start"], "2026-11-01T11:15:00+03:00")
         with self.assertRaises(ValueError):
             check.parse_event(page(3558805, True, entries), 3219855, now)
         recurring = check.parse_event(page(3219855, False, entries), 3219855, now)
         self.assertTrue(recurring["registration_open"],
                         "available child slots override the parent's closed flag")
-        self.assertEqual([slot["id"] for slot in recurring["slots"]], ["21", "20"])
+        self.assertEqual([slot["id"] for slot in recurring["slots"]], ["21", "20", "25"])
         closed = check.parse_event(page(3219855, False, []), 3219855, now)
         self.assertFalse(closed["registration_open"])
         self.assertEqual(closed["slots"], [])

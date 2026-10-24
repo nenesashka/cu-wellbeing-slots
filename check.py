@@ -44,7 +44,12 @@ def parse_event(html, event_id, now=None):
     now = now or dt.datetime.now(dt.timezone.utc)
     slots = []
     for entry in entries:
-        if entry.get("unavaliable") is not False or int(entry.get("tickets_left") or 0) < 1:
+        if entry.get("unavaliable") is not False:
+            continue
+        # Online appointments may have unlimited tickets. Timepad then sends
+        # tickets_limited=false and tickets_left=null for bookable child events.
+        limited = entry.get("tickets_limited")
+        if limited is not False and int(entry.get("tickets_left") or 0) < 1:
             continue
         start = dt.datetime.fromisoformat(entry["date_iso8601"].replace("Z", "+00:00"))
         if start.tzinfo is None:
