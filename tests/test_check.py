@@ -29,7 +29,13 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result["slots"][0]["start"], "2026-11-01T11:15:00+03:00")
         with self.assertRaises(ValueError):
             check.parse_event(page(3558805, True, entries), 3219855, now)
-        self.assertEqual(check.parse_event(page(3219855, False, entries), 3219855, now)["slots"], [])
+        recurring = check.parse_event(page(3219855, False, entries), 3219855, now)
+        self.assertTrue(recurring["registration_open"],
+                        "available child slots override the parent's closed flag")
+        self.assertEqual([slot["id"] for slot in recurring["slots"]], ["21", "20"])
+        closed = check.parse_event(page(3219855, False, []), 3219855, now)
+        self.assertFalse(closed["registration_open"])
+        self.assertEqual(closed["slots"], [])
 
     def test_partial_source_failure_delivers_both_statuses_once(self):
         delivered = []

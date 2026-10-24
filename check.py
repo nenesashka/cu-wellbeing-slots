@@ -43,17 +43,18 @@ def parse_event(html, event_id, now=None):
 
     now = now or dt.datetime.now(dt.timezone.utc)
     slots = []
-    if registration_open:
-        for entry in entries:
-            if entry.get("unavaliable") is not False or int(entry.get("tickets_left") or 0) < 1:
-                continue
-            start = dt.datetime.fromisoformat(entry["date_iso8601"].replace("Z", "+00:00"))
-            if start.tzinfo is None:
-                raise ValueError("Timepad slot has no timezone")
-            if start > now:
-                slots.append({"id": str(entry["id"]), "start": start.astimezone(MOSCOW).isoformat()})
+    for entry in entries:
+        if entry.get("unavaliable") is not False or int(entry.get("tickets_left") or 0) < 1:
+            continue
+        start = dt.datetime.fromisoformat(entry["date_iso8601"].replace("Z", "+00:00"))
+        if start.tzinfo is None:
+            raise ValueError("Timepad slot has no timezone")
+        if start > now:
+            slots.append({"id": str(entry["id"]), "start": start.astimezone(MOSCOW).isoformat()})
     slots.sort(key=lambda slot: slot["start"])
-    return {"registration_open": registration_open, "slots": slots}
+    # Recurring child appointments can be bookable even when the parent event
+    # reports reg_open=false. The actual child ticket state takes precedence.
+    return {"registration_open": registration_open or bool(slots), "slots": slots}
 
 
 def check_event(name, event_id):
