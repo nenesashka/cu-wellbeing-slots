@@ -11,7 +11,8 @@ const props = {
   deleteProperty: key => { delete values[key]; },
   getProperties: () => ({...values})
 };
-const sent = [];
+const calls = [];
+let nextMessageId = 500;
 let dispatches = 0;
 const context = {
   console,
@@ -33,11 +34,18 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../appsscript/Code.gs'), 'utf8'), context);
-context.telegramApi = (method, payload) => { sent.push({method, payload}); return {ok: true}; };
+context.telegramApi = (method, payload) => {
+  const result = method === 'sendMessage' ? {message_id: nextMessageId++} : true;
+  calls.push({method, payload, result});
+  return {ok: true, result};
+};
 context.dispatchCheck = () => { dispatches++; };
-
-const payload = {
-  checked_at: new Date().toISOString(),
+const messages = () => calls.filter(x => x.method === 'sendMessage');
+const edits = () => calls.filter(x => x.method === 'editMessageText');
+const now = new Date();
+const checkedAt = seconds => new Date(now.getTime() + seconds * 1000).toISOString();
+const base = {
+  checked_at: checkedAt(0),
   events: {
     svetlana: {registration_open: true, slots: [
       {id: '1', start: '2030-11-16T11:15:00+03:00'},
@@ -46,63 +54,91 @@ const payload = {
     lilia: {registration_open: false, slots: []}
   }
 };
-context.handleWorkflow(payload, props);
-assert.equal(sent.filter(x => x.method === 'sendMessage').length, 1);
-const first = sent[0].payload;
-assert.match(first.text, /Светлана Шутькова · очно/);
-assert.match(first.text, /Лилия Павлова · онлайн/);
-assert.match(first.text, /16 ноября 2030 — 11:15, 14:00/);
-assert.match(first.text, /Регистрация пока закрыта/);
-assert.equal(first.reply_markup.inline_keyboard[2][1].url, 'https://cu-events.timepad.ru/event/3558805/');
-assert.equal(sent.filter(x => x.method === 'setMyCommands').length, 1);
 
-sent.length = 0;
-context.handleWorkflow(payload, props);
-assert.equal(sent.length, 0, 'unchanged scheduled check must stay quiet');
+// First scheduled result goes to a subscriber once, with separate sources.
+context.handleWorkflow(base, props);
+assert.equal(messages().length, 1);
+assert.match(messages()[0].payload.text, /^Свободные слоты к психологам/);
+assert.doesNotMatch(messages()[0].payload.text, /^CU CareSlot/);
+assert.match(messages()[0].payload.text, /16 ноября 2030 — 11:15, 14:00/);
+assert.match(messages()[0].payload.text, /Лилия Павлова · онлайн\nРегистрация пока закрыта/);
+assert.equal(messages()[0].payload.reply_markup.inline_keyboard[2][0].text, 'Страница Светланы');
+assert.equal(messages()[0].payload.reply_markup.inline_keyboard[3][0].text, 'Страница Лилии');
+assert.equal(calls.filter(x => x.method === 'setMyCommands').length, 1);
+calls.length = 0;
+context.handleWorkflow(base, props);
+assert.equal(calls.length, 0, 'duplicate workflow result stays quiet');
 
+// Any user can subscribe. Navigation buttons edit the same message.
 context.handleTelegram({update_id: 298, message: {chat: {id: 303, type: 'private'}, text: '/start'}}, props);
-assert.equal(values.SUB_303, '1', 'any private user can subscribe');
-sent.length = 0;
-context.handleTelegram({update_id: 299, callback_query: {id: 'button-1', data: 'lilia',
-  message: {chat: {id: 303, type: 'private'}}}}, props);
-assert.equal(sent[0].method, 'answerCallbackQuery');
-assert.match(sent[1].payload.text, /Лилия Павлова · онлайн/);
-assert.doesNotMatch(sent[1].payload.text, /Светлана Шутькова/);
-assert.equal(sent[1].payload.reply_markup.inline_keyboard[0][0].url,
-  'https://cu-events.timepad.ru/event/3558805/');
+assert.equal(values.SUB_303, '1');
+const menuId = messages()[0].result.message_id;
+calls.length = 0;
+context.handleTelegram({update_id: 299, callback_query: {id: 'view-lilia', data: 'lilia',
+  message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
+assert.equal(calls[0].method, 'answerCallbackQuery');
+assert.equal(edits().length, 1);
+assert.equal(messages().length, 0);
+assert.equal(edits()[0].payload.message_id, menuId);
+assert.match(edits()[0].payload.text, /^Лилия Павлова · онлайн/);
+assert.doesNotMatch(edits()[0].payload.text, /Светлана Шутькова/);
+assert.equal(edits()[0].payload.reply_markup.inline_keyboard[0][0].text, 'Страница Лилии');
 
-context.handleTelegram({update_id: 300, message: {chat: {id: 202, type: 'private'}, text: '/check'}}, props);
+for (const [updateId, data, expected] of [
+  [2991, 'help', /^Как пользоваться ботом/],
+  [2992, 'all', /^Свободные слоты к психологам/],
+  [2993, 'lilia', /^Лилия Павлова · онлайн/]
+]) {
+  calls.length = 0;
+  context.handleTelegram({update_id: updateId, callback_query: {id: `navigation-${updateId}`, data,
+    message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
+  assert.equal(messages().length, 0);
+  assert.equal(edits().length, 1);
+  assert.equal(edits()[0].payload.message_id, menuId);
+  assert.match(edits()[0].payload.text, expected);
+}
+
+// Checking from an inline button edits that message, then edits it again with fresh data.
+calls.length = 0;
+context.handleTelegram({update_id: 300, callback_query: {id: 'check-lilia', data: 'check_lilia',
+  message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
 assert.equal(dispatches, 1);
-assert.equal(values.PEND_202, '1');
-assert.match(sent.at(-1).payload.text, /Обновляю данные/);
-const afterCheck = sent.length;
-context.handleTelegram({update_id: 300, message: {chat: {id: 202, type: 'private'}, text: '/check'}}, props);
-assert.equal(sent.length, afterCheck, 'duplicate Telegram update must not send again');
+assert.equal(edits().length, 1);
+assert.equal(messages().length, 0);
+assert.match(edits()[0].payload.text, /Проверяю страницы/);
+assert.equal(JSON.parse(values.PEND_303).messageId, menuId);
+assert.equal(JSON.parse(values.PEND_303).view, 'lilia');
+const callCount = calls.length;
+context.handleTelegram({update_id: 300, callback_query: {id: 'check-lilia', data: 'check_lilia',
+  message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
+assert.equal(calls.length, callCount + 1, 'duplicate callback is acknowledged but not processed');
 assert.equal(dispatches, 1);
 
-sent.length = 0;
-context.handleWorkflow({...payload, checked_at: new Date(Date.now() + 1000).toISOString(),
-  events: {...payload.events, lilia: {error: 'source_unavailable'}}}, props);
-assert.equal(values.EV_LILIA_STATUS, 'error');
-assert.equal(values.EV_SVETLANA_STATUS, 'open');
-assert.equal(values.PEND_202, undefined);
-assert.equal(sent.filter(x => x.method === 'sendMessage').length, 3, 'each subscriber and requester gets one result');
-assert.match(sent[0].payload.text, /Не удалось обновить данные/);
-assert.doesNotMatch(sent[0].payload.text, /Регистрация пока закрыта/);
+calls.length = 0;
+const changed = {...base, checked_at: checkedAt(1), events: {...base.events,
+  lilia: {registration_open: true, slots: [{id: '3', start: '2030-11-17T16:30:00+03:00'}]}}};
+context.handleWorkflow(changed, props);
+assert.equal(messages().length, 1, 'other subscriber gets one new notification');
+assert.equal(messages()[0].payload.chat_id, '101');
+assert.equal(edits().length, 1, 'requester sees the existing message updated');
+assert.equal(edits()[0].payload.chat_id, '303');
+assert.equal(edits()[0].payload.message_id, menuId);
+assert.match(edits()[0].payload.text, /Лилия Павлова · онлайн\n17 ноября 2030 — 16:30/);
+assert.doesNotMatch(edits()[0].payload.text, /Светлана Шутькова/);
+assert.doesNotMatch(edits()[0].payload.text, /Проверяю страницы/);
 
-sent.length = 0;
-context.handleWorkflow({...payload, checked_at: values.LAST_WORKFLOW_CHECKED_AT,
-  events: {...payload.events, lilia: {error: 'source_unavailable'}}}, props);
-assert.equal(sent.length, 0, 'duplicate workflow callback must be ignored');
-
+// A typed /check gets one bot message, which is edited after an unchanged check.
+calls.length = 0;
 context.handleTelegram({update_id: 301, message: {chat: {id: 202, type: 'private'}, text: '/check'}}, props);
-sent.length = 0;
-context.handleWorkflow({...payload, checked_at: new Date(Date.now() + 2000).toISOString(),
-  events: {...payload.events, lilia: {error: 'source_unavailable'}}}, props);
-const completion = sent.filter(x => x.method === 'sendMessage');
-assert.equal(completion.length, 1);
-assert.match(completion[0].payload.text, /Не удалось обновить: Лилия Павлова/);
-assert.doesNotMatch(completion[0].payload.text, /16 ноября/,
-  'unchanged /check must not repeat the whole slot list');
+assert.equal(dispatches, 2);
+assert.equal(messages().length, 1);
+const commandMessageId = messages()[0].result.message_id;
+assert.equal(JSON.parse(values.PEND_202).messageId, commandMessageId);
+calls.length = 0;
+context.handleWorkflow({...changed, checked_at: checkedAt(2)}, props);
+assert.equal(messages().length, 0, 'unchanged check must not send another message');
+assert.equal(edits().length, 1);
+assert.equal(edits()[0].payload.message_id, commandMessageId);
+assert.doesNotMatch(edits()[0].payload.text, /Проверяю страницы/);
 
 console.log('Apps Script integration tests passed');

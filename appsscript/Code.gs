@@ -36,16 +36,21 @@ function handleTelegram(update, props) {
   if (!message || !message.chat || message.chat.type !== 'private') return;
   const chatId = String(message.chat.id);
   if (!/^\d+$/.test(chatId)) return;
+  const messageId = callback ? Number(message.message_id || 0) : 0;
   const action = callback ? String(callback.data || '') :
     String(message.text || '').trim().split(/\s+/)[0].split('@')[0];
   const allowed = ['/start', '/check', '/help', '/stop', '/svetlana', '/lilia',
-    'check', 'all', 'svetlana', 'lilia', 'help'];
+    'check', 'check_svetlana', 'check_lilia', 'all', 'svetlana', 'lilia', 'help'];
+  const checkView = action === 'check_svetlana' ? 'svetlana' :
+    action === 'check_lilia' ? 'lilia' : 'all';
+  const isCheck = action === '/check' || action === 'check' ||
+    action === 'check_svetlana' || action === 'check_lilia';
   if (callback) safeAnswerCallback(callback.id);
   if (allowed.indexOf(action) < 0) return;
 
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
-  let state, dispatchNeeded = false;
+  let state, dispatchNeeded = false, requestCheck = false;
   try {
     const seen = JSON.parse(props.getProperty('RECENT_UPDATES') || '[]');
     const updateId = String(update.update_id);
@@ -53,11 +58,15 @@ function handleTelegram(update, props) {
     seen.push(updateId);
     props.setProperty('RECENT_UPDATES', JSON.stringify(seen.slice(-180)));
     if (action === '/start') props.setProperty('SUB_' + chatId, '1');
-    if (action === '/stop') props.deleteProperty('SUB_' + chatId);
+    if (action === '/stop') {
+      props.deleteProperty('SUB_' + chatId);
+      props.deleteProperty('PEND_' + chatId);
+    }
     state = readState(props);
-    if (action === '/check' || action === 'check' ||
-        (action === '/start' && EVENTS.some(function(event) { return state[event.key].status === 'unknown'; }))) {
-      props.setProperty('PEND_' + chatId, '1');
+    requestCheck = isCheck ||
+      (action === '/start' && EVENTS.some(function(event) { return state[event.key].status === 'unknown'; }));
+    if (requestCheck) {
+      props.setProperty('PEND_' + chatId, JSON.stringify({messageId: messageId, view: checkView}));
       const now = Date.now();
       if (props.getProperty('IN_FLIGHT') !== '1' ||
           now - Number(props.getProperty('LAST_DISPATCH_MS') || 0) > 600000) {
@@ -65,34 +74,73 @@ function handleTelegram(update, props) {
         props.setProperty('LAST_DISPATCH_MS', String(now));
         dispatchNeeded = true;
       }
+    } else if (callback && props.getProperty('PEND_' + chatId)) {
+      const pending = readPending(props.getProperty('PEND_' + chatId), chatId);
+      pending.messageId = messageId;
+      pending.view = action;
+      props.setProperty('PEND_' + chatId, JSON.stringify(pending));
     }
   } finally {
     lock.releaseLock();
   }
 
+  if (callback && !isCheck) {
+    const view = viewMessage(action, state);
+    safeEdit(chatId, messageId, view.text, view.keyboard);
+    return;
+  }
+
   if (action === '/stop') {
     sendTelegram(chatId, 'Уведомления отключены. Проверять слоты вручную можно командой /check. Чтобы снова подписаться, отправьте /start.', menuKeyboard());
-  } else if (action === '/help' || action === 'help') {
+  } else if (action === '/help') {
     sendTelegram(chatId, helpText(), menuKeyboard());
   } else if (action === '/start') {
-    sendTelegram(chatId, welcomeText() + '\n\n' + formatReport(state) +
-      (dispatchNeeded ? '\n\nОбновляю данные…' : ''), menuKeyboard());
+    const sentId = sendTelegram(chatId, welcomeText() + '\n\n' + formatReport(state) +
+      (requestCheck ? '\n\nПроверяю страницы…' : ''), menuKeyboard());
+    if (requestCheck) savePendingMessageId(props, chatId, sentId);
     if (dispatchNeeded) {
       try { dispatchCheck(props); }
       catch (error) { failDispatch(props); }
     }
-  } else if (action === '/svetlana' || action === 'svetlana' || action === '/lilia' || action === 'lilia') {
-    const event = EVENTS[(action === '/lilia' || action === 'lilia') ? 1 : 0];
-    sendTelegram(chatId, formatEvent(event, state[event.key]) + '\n\nВремя московское.', eventKeyboard(event));
-  } else if (action === 'all') {
-    sendTelegram(chatId, formatReport(state), menuKeyboard());
+  } else if (action === '/svetlana' || action === '/lilia') {
+    const view = viewMessage(action.slice(1), state);
+    sendTelegram(chatId, view.text, view.keyboard);
   } else {
-    sendTelegram(chatId, formatReport(state) + '\n\nОбновляю данные. Сообщу результат отдельно.', menuKeyboard());
+    const view = viewMessage(checkView, state);
+    const text = view.text + '\n\nПроверяю страницы…';
+    if (callback) {
+      safeEdit(chatId, messageId, text, view.keyboard);
+    } else {
+      savePendingMessageId(props, chatId, sendTelegram(chatId, text, view.keyboard));
+    }
     if (dispatchNeeded) {
       try { dispatchCheck(props); }
       catch (error) { failDispatch(props); }
     }
   }
+}
+
+function readPending(value, chatId) {
+  try {
+    const pending = JSON.parse(value);
+    return {chatId: chatId, messageId: Number(pending.messageId || 0), view: pending.view || 'all'};
+  } catch (error) {
+    // Legacy pending value from the previous deployment.
+    return {chatId: chatId, messageId: 0, view: 'all'};
+  }
+}
+
+function savePendingMessageId(props, chatId, messageId) {
+  if (!messageId) return;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const value = props.getProperty('PEND_' + chatId);
+    if (!value) return;
+    const pending = readPending(value, chatId);
+    pending.messageId = messageId;
+    props.setProperty('PEND_' + chatId, JSON.stringify(pending));
+  } finally { lock.releaseLock(); }
 }
 
 function validateResult(payload) {
@@ -137,7 +185,7 @@ function handleWorkflow(payload, props) {
     subscribers = Object.keys(all).filter(function(key) { return /^SUB_\d+$/.test(key); })
       .map(function(key) { return key.slice(4); });
     pending = Object.keys(all).filter(function(key) { return /^PEND_\d+$/.test(key); })
-      .map(function(key) { return key.slice(5); });
+      .map(function(key) { return readPending(all[key], key.slice(5)); });
     EVENTS.forEach(function(event) {
       const item = result.events[event.key];
       const prefix = 'EV_' + event.key.toUpperCase() + '_';
@@ -155,7 +203,7 @@ function handleWorkflow(payload, props) {
         writeSlots(props, event.key, item.slots);
       }
     });
-    pending.forEach(function(chatId) { props.deleteProperty('PEND_' + chatId); });
+    pending.forEach(function(item) { props.deleteProperty('PEND_' + item.chatId); });
     props.setProperty('IN_FLIGHT', '0');
     props.setProperty('LAST_WORKFLOW_CHECKED_AT', result.checkedAt);
     state = readState(props);
@@ -164,19 +212,24 @@ function handleWorkflow(payload, props) {
   }
   if (changed) {
     const report = formatReport(state);
-    unique(subscribers.concat(pending)).forEach(function(chatId) {
+    const pendingIds = pending.filter(function(item) { return item.view !== 'help'; })
+      .map(function(item) { return item.chatId; });
+    subscribers.filter(function(chatId) { return pendingIds.indexOf(chatId) < 0; }).forEach(function(chatId) {
       safeSend(chatId, report, menuKeyboard());
     });
-  } else {
-    const failed = EVENTS.filter(function(event) { return state[event.key].status === 'error'; })
-      .map(function(event) { return event.name; });
-    const summary = failed.length ? 'Проверка завершена. Не удалось обновить: ' + failed.join(', ') + '.' :
-      'Проверка завершена — изменений нет.';
-    unique(pending).forEach(function(chatId) {
-      safeSend(chatId, summary, menuKeyboard());
-    });
   }
+  pending.forEach(function(item) { deliverPending(item, state); });
   maybeConfigureBotProfile(props);
+}
+
+function deliverPending(item, state) {
+  if (item.view === 'help') return;
+  const view = viewMessage(item.view, state);
+  if (item.messageId) {
+    safeEdit(item.chatId, item.messageId, view.text, view.keyboard);
+  } else {
+    safeSend(item.chatId, view.text, view.keyboard);
+  }
 }
 
 function readState(props) {
@@ -193,25 +246,25 @@ function readState(props) {
 }
 
 function welcomeText() {
-  return 'Привет! Это CU CareSlot.\n\nЯ слежу за записью к Светлане Шутьковой (очно) и Лилии Павловой (онлайн). Проверяю слоты дважды в день и сообщаю об изменениях. Команда /check запускает дополнительную проверку.';
+  return 'Привет! Здесь можно следить за записью к психологам ЦУ: Светлане Шутьковой (очно) и Лилии Павловой (онлайн). Я проверяю слоты дважды в день и сообщаю об изменениях. Кнопка «Обновить» запускает дополнительную проверку.';
 }
 
 function helpText() {
-  return 'Как пользоваться CU CareSlot\n\n/check — проверить обе записи сейчас\n/svetlana — очные консультации Светланы\n/lilia — онлайн консультации Лилии\n/start — включить уведомления\n/stop — отключить уведомления\n\nВремя указано по Москве. Бот показывает наличие мест; запись оформляется на Timepad.';
+  return 'Как пользоваться ботом\n\nНажмите «Обновить», чтобы проверить обе записи. Кнопки с именами покажут слоты каждого психолога прямо в этом сообщении.\n\n/check — проверить обе записи\n/svetlana — очно\n/lilia — онлайн\n/start — включить уведомления\n/stop — отключить уведомления\n\nВремя московское. Запись оформляется на Timepad.';
 }
 
 function formatReport(state) {
   const sections = EVENTS.map(function(event) { return formatEvent(event, state[event.key]); });
   const checked = EVENTS.map(function(event) { return state[event.key].checkedAt; }).filter(Boolean).sort();
-  const footer = checked.length ? 'Последняя успешная проверка: ' + dateLabel(checked[checked.length - 1]) + ' МСК.' : 'Ожидаю первую проверку.';
-  return 'CU CareSlot · свободное время (МСК)\n\n' + sections.join('\n\n') + '\n\n' + footer;
+  const footer = checked.length ? 'Проверено ' + dateLabel(checked[checked.length - 1]) + ' по Москве.' : 'Ожидаю первую проверку.';
+  return 'Свободные слоты к психологам\n\n' + sections.join('\n\n') + '\n\n' + footer;
 }
 
 function formatEvent(event, item) {
   const heading = event.name + ' · ' + event.mode;
   if (!item || item.status === 'unknown') return heading + '\nДанные пока не получены.';
   if (item.status === 'error') return heading + '\n⚠️ Не удалось обновить данные.' +
-    (item.checkedAt ? ' Последняя успешная проверка: ' + dateLabel(item.checkedAt) + ' МСК.' : '');
+    (item.checkedAt ? ' Последняя успешная проверка: ' + dateLabel(item.checkedAt) + ' по Москве.' : '');
   if (item.status === 'closed') return heading + '\nРегистрация пока закрыта.';
   if (!item.slots.length) return heading + '\nРегистрация открыта, свободных слотов сейчас нет.';
   const groups = {}, order = [];
@@ -233,19 +286,34 @@ function formatEvent(event, item) {
   }).join('\n');
 }
 
+function viewMessage(view, state) {
+  if (view === 'help') return {text: helpText(), keyboard: menuKeyboard()};
+  if (view === 'svetlana' || view === 'lilia') {
+    const event = EVENTS[view === 'lilia' ? 1 : 0];
+    const item = state[event.key];
+    return {
+      text: formatEvent(event, item) + '\n\n' +
+        (item.checkedAt ? 'Проверено ' + dateLabel(item.checkedAt) + ' по Москве.' : 'Время московское.'),
+      keyboard: eventKeyboard(event)
+    };
+  }
+  return {text: formatReport(state), keyboard: menuKeyboard()};
+}
+
 function menuKeyboard() {
   return {inline_keyboard: [
-    [{text: '🔄 Проверить сейчас', callback_data: 'check'}],
-    [{text: 'Светлана · очно', callback_data: 'svetlana'}, {text: 'Лилия · онлайн', callback_data: 'lilia'}],
-    [{text: 'Страница Светланы ↗', url: EVENTS[0].url}, {text: 'Страница Лилии ↗', url: EVENTS[1].url}],
+    [{text: 'Обновить', callback_data: 'check'}],
+    [{text: 'Светлана', callback_data: 'svetlana'}, {text: 'Лилия', callback_data: 'lilia'}],
+    [{text: 'Страница Светланы', url: EVENTS[0].url}],
+    [{text: 'Страница Лилии', url: EVENTS[1].url}],
     [{text: 'Как это работает', callback_data: 'help'}]
   ]};
 }
 
 function eventKeyboard(event) {
   return {inline_keyboard: [
-    [{text: 'Открыть страницу ↗', url: event.url}],
-    [{text: 'Все слоты', callback_data: 'all'}, {text: 'Обновить', callback_data: 'check'}]
+    [{text: 'Страница ' + (event.key === 'lilia' ? 'Лилии' : 'Светланы'), url: event.url}],
+    [{text: 'Все слоты', callback_data: 'all'}, {text: 'Обновить', callback_data: 'check_' + event.key}]
   ]};
 }
 
@@ -267,15 +335,20 @@ function dispatchCheck(props) {
 function failDispatch(props) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
-  let pending;
+  let pending, state;
   try {
     const all = props.getProperties();
     pending = Object.keys(all).filter(function(key) { return /^PEND_\d+$/.test(key); })
-      .map(function(key) { props.deleteProperty(key); return key.slice(5); });
+      .map(function(key) { props.deleteProperty(key); return readPending(all[key], key.slice(5)); });
     props.setProperty('IN_FLIGHT', '0');
+    state = readState(props);
   } finally { lock.releaseLock(); }
-  unique(pending).forEach(function(chatId) {
-    safeSend(chatId, 'Не удалось запустить проверку. Попробуйте /check позже.', menuKeyboard());
+  pending.forEach(function(item) {
+    if (item.view === 'help') return;
+    const view = viewMessage(item.view, state);
+    const text = view.text + '\n\nНе удалось запустить проверку. Попробуйте позже.';
+    if (item.messageId) safeEdit(item.chatId, item.messageId, text, view.keyboard);
+    else safeSend(item.chatId, text, view.keyboard);
   });
 }
 
@@ -293,6 +366,8 @@ function telegramApi(method, payload) {
   if (response.getResponseCode() !== 200) {
     const error = new Error('Telegram API failed');
     error.status = response.getResponseCode();
+    try { error.description = String(JSON.parse(response.getContentText()).description || ''); }
+    catch (parseError) { error.description = ''; }
     throw error;
   }
   return JSON.parse(response.getContentText());
@@ -312,11 +387,32 @@ function sendTelegram(chatId, message, keyboard) {
     part += (part ? '\n' : '') + line;
   });
   if (part) pieces.push(part);
+  let lastMessageId = 0;
   pieces.forEach(function(piece, index) {
     const payload = {chat_id: chatId, text: piece, disable_web_page_preview: true};
     if (keyboard && index === pieces.length - 1) payload.reply_markup = keyboard;
-    telegramApi('sendMessage', payload);
+    const response = telegramApi('sendMessage', payload);
+    lastMessageId = Number(response.result && response.result.message_id || 0);
   });
+  return lastMessageId;
+}
+
+function editTelegram(chatId, messageId, message, keyboard) {
+  if (!messageId) throw new Error('Missing message to edit');
+  const payload = {chat_id: chatId, message_id: messageId, text: message,
+    link_preview_options: {is_disabled: true}};
+  if (keyboard) payload.reply_markup = keyboard;
+  telegramApi('editMessageText', payload);
+}
+
+function safeEdit(chatId, messageId, message, keyboard) {
+  try { editTelegram(chatId, messageId, message, keyboard); }
+  catch (error) {
+    if (error.status === 400 && /message is not modified/i.test(error.description || '')) return;
+    console.error('Telegram edit error: ' + String(error.status || error.name || 'Error'));
+    // A deleted or inaccessible old message cannot be edited; preserve the result.
+    safeSend(chatId, message, keyboard);
+  }
 }
 
 function safeSend(chatId, message, keyboard) {
