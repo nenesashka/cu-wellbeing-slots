@@ -1,6 +1,6 @@
 # CU CareSlot
 
-Телеграм-бот [@cu_wellbeing_slots_bot](https://t.me/cu_wellbeing_slots_bot) следит за записью к двум психологам ЦУ:
+Телеграм-бот [@cucareslot_app](https://t.me/cucareslot_app) следит за записью к двум психологам ЦУ:
 
 | Психолог | Формат | Страница записи |
 | --- | --- | --- |
