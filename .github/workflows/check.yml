@@ -23,7 +23,7 @@ jobs:
       CHAT_ID: ${{ secrets.CHAT_ID }}
       FORCE_REPORT: ${{ inputs.force_report || 'false' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: true
       - name: Fetch Timepad and send Telegram update
