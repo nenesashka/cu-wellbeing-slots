@@ -60,6 +60,17 @@ sent.length = 0;
 context.handleWorkflow(payload, props);
 assert.equal(sent.length, 0, 'unchanged scheduled check must stay quiet');
 
+context.handleTelegram({update_id: 298, message: {chat: {id: 303, type: 'private'}, text: '/start'}}, props);
+assert.equal(values.SUB_303, '1', 'any private user can subscribe');
+sent.length = 0;
+context.handleTelegram({update_id: 299, callback_query: {id: 'button-1', data: 'lilia',
+  message: {chat: {id: 303, type: 'private'}}}}, props);
+assert.equal(sent[0].method, 'answerCallbackQuery');
+assert.match(sent[1].payload.text, /Лилия Павлова · онлайн/);
+assert.doesNotMatch(sent[1].payload.text, /Светлана Шутькова/);
+assert.equal(sent[1].payload.reply_markup.inline_keyboard[0][0].url,
+  'https://cu-events.timepad.ru/event/3558805/');
+
 context.handleTelegram({update_id: 300, message: {chat: {id: 202, type: 'private'}, text: '/check'}}, props);
 assert.equal(dispatches, 1);
 assert.equal(values.PEND_202, '1');
@@ -75,7 +86,7 @@ context.handleWorkflow({...payload, checked_at: new Date(Date.now() + 1000).toIS
 assert.equal(values.EV_LILIA_STATUS, 'error');
 assert.equal(values.EV_SVETLANA_STATUS, 'open');
 assert.equal(values.PEND_202, undefined);
-assert.equal(sent.filter(x => x.method === 'sendMessage').length, 2, 'subscriber and requester get one result each');
+assert.equal(sent.filter(x => x.method === 'sendMessage').length, 3, 'each subscriber and requester gets one result');
 assert.match(sent[0].payload.text, /Не удалось обновить данные/);
 assert.doesNotMatch(sent[0].payload.text, /Регистрация пока закрыта/);
 
