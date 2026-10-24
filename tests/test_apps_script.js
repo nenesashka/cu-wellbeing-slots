@@ -145,6 +145,15 @@ calls.length = 0;
 context.handleWorkflow({...changed, checked_at: checkedAt(4), source: 'schedule'}, props);
 assert.equal(messages().length, 0, 'unchanged scheduled result stays quiet');
 
+// Missing or unknown source must also fail closed, even when availability changes.
+calls.length = 0;
+const changedAgain = {...changed, checked_at: checkedAt(5), source: undefined, events: {...changed.events,
+  lilia: {registration_open: false, slots: []}}};
+context.handleWorkflow(changedAgain, props);
+assert.equal(messages().length, 0, 'unclassified check cannot broadcast');
+context.handleWorkflow({...changedAgain, checked_at: checkedAt(6), source: 'schedule'}, props);
+assert.equal(messages().length, 2, 'next scheduled check delivers the missed change once');
+
 // Simulate a broadcast to 700 subscribers without sending real Telegram messages.
 values.BOT_TOKEN = 'test-token';
 const batches = [];
