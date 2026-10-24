@@ -46,6 +46,7 @@ const now = new Date();
 const checkedAt = seconds => new Date(now.getTime() + seconds * 1000).toISOString();
 const base = {
   checked_at: checkedAt(0),
+  source: 'schedule',
   events: {
     svetlana: {registration_open: true, slots: [
       {id: '1', start: '2030-11-16T11:15:00+03:00'},
@@ -112,9 +113,8 @@ assert.equal(dispatches, 1);
 calls.length = 0;
 const changed = {...base, checked_at: checkedAt(1), events: {...base.events,
   lilia: {registration_open: true, slots: [{id: '3', start: '2030-11-17T16:30:00+03:00'}]}}};
-context.handleWorkflow(changed, props);
-assert.equal(messages().length, 1, 'other subscriber gets one new notification');
-assert.equal(messages()[0].payload.chat_id, '101');
+context.handleWorkflow({...changed, source: 'workflow_dispatch'}, props);
+assert.equal(messages().length, 0, 'manual check must never notify another subscriber');
 assert.equal(edits().length, 1, 'requester sees the existing message updated');
 assert.equal(edits()[0].payload.chat_id, '303');
 assert.equal(edits()[0].payload.message_id, menuId);
@@ -130,11 +130,20 @@ assert.equal(messages().length, 1);
 const commandMessageId = messages()[0].result.message_id;
 assert.equal(JSON.parse(values.PEND_202).messageId, commandMessageId);
 calls.length = 0;
-context.handleWorkflow({...changed, checked_at: checkedAt(2)}, props);
+context.handleWorkflow({...changed, checked_at: checkedAt(2), source: 'workflow_dispatch'}, props);
 assert.equal(messages().length, 0, 'unchanged check must not send another message');
 assert.equal(edits().length, 1);
 assert.equal(edits()[0].payload.message_id, commandMessageId);
 assert.doesNotMatch(edits()[0].payload.text, /Проверяю страницы/);
+
+// A scheduled check broadcasts the change found by a manual check, once.
+calls.length = 0;
+context.handleWorkflow({...changed, checked_at: checkedAt(3), source: 'schedule'}, props);
+assert.equal(messages().length, 2, 'scheduled change reaches both subscribers');
+assert.deepEqual(messages().map(x => x.payload.chat_id).sort(), ['101', '303']);
+calls.length = 0;
+context.handleWorkflow({...changed, checked_at: checkedAt(4), source: 'schedule'}, props);
+assert.equal(messages().length, 0, 'unchanged scheduled result stays quiet');
 
 // Simulate a broadcast to 700 subscribers without sending real Telegram messages.
 values.BOT_TOKEN = 'test-token';

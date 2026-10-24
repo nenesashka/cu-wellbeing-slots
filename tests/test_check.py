@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import os
 import unittest
 from unittest import mock
 import sys
@@ -46,12 +47,14 @@ class CheckTests(unittest.TestCase):
                 raise TimeoutError("source unavailable")
             return {"registration_open": True, "slots": [{"id": "1", "start": "2026-11-01T11:15:00+03:00"}]}
         with mock.patch.object(check, "check_event", side_effect=fake_check), \
-             mock.patch.object(check, "deliver", side_effect=delivered.append):
+             mock.patch.object(check, "deliver", side_effect=delivered.append), \
+             mock.patch.dict(os.environ, {"CHECK_SOURCE": "workflow_dispatch"}):
             with self.assertRaisesRegex(RuntimeError, "One or more"):
                 check.main()
         self.assertEqual(len(delivered), 1)
         self.assertEqual(set(delivered[0]["events"]), {"svetlana", "lilia"})
         self.assertEqual(delivered[0]["events"]["lilia"], {"error": "source_unavailable"})
+        self.assertEqual(delivered[0]["source"], "workflow_dispatch")
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 7
     env:
       DELIVERY_URL: ${{ secrets.DELIVERY_URL }}
+      CHECK_SOURCE: ${{ github.event_name }}
     steps:
       - uses: actions/checkout@v7
       - name: Fetch Timepad and deliver available slots

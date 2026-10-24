@@ -150,7 +150,7 @@ function validateResult(payload) {
   }
   const checkedAt = new Date(payload.checked_at);
   if (checkedAt.getTime() > Date.now() + 300000) throw new Error('Future result');
-  const result = {checkedAt: checkedAt.toISOString(), events: {}};
+  const result = {checkedAt: checkedAt.toISOString(), source: payload.source, events: {}};
   EVENTS.forEach(function(event) {
     const item = payload.events[event.key];
     if (!item || typeof item !== 'object') throw new Error('Missing event result');
@@ -178,7 +178,7 @@ function handleWorkflow(payload, props) {
   const result = validateResult(payload);
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
-  let subscribers, pending, changed = false, state;
+  let subscribers, pending, broadcastChanged = false, state;
   try {
     const previousResult = props.getProperty('LAST_WORKFLOW_CHECKED_AT') || '';
     if (previousResult && Date.parse(result.checkedAt) <= Date.parse(previousResult)) return;
@@ -191,17 +191,26 @@ function handleWorkflow(payload, props) {
       const item = result.events[event.key];
       const prefix = 'EV_' + event.key.toUpperCase() + '_';
       const previous = props.getProperty(prefix + 'STATUS') || 'unknown';
+      // Preserve the last known state before a manual check updates the cache.
+      if (!props.getProperty(prefix + 'BROADCAST_SIGNATURE')) {
+        props.setProperty(prefix + 'BROADCAST_SIGNATURE',
+          previous === 'error' ? 'error' : (props.getProperty(prefix + 'SIGNATURE') || 'initial'));
+      }
+      let signature;
       if (item.error) {
-        if (previous !== 'error') changed = true;
+        signature = 'error';
         props.setProperty(prefix + 'STATUS', 'error');
       } else {
         const status = item.registrationOpen ? 'open' : 'closed';
-        const signature = hashSlots(item.slots) + ':' + status;
-        if (signature !== props.getProperty(prefix + 'SIGNATURE') || previous === 'error') changed = true;
+        signature = hashSlots(item.slots) + ':' + status;
         props.setProperty(prefix + 'STATUS', status);
         props.setProperty(prefix + 'SIGNATURE', signature);
         props.setProperty(prefix + 'CHECKED_AT', result.checkedAt);
         writeSlots(props, event.key, item.slots);
+      }
+      if (result.source === 'schedule') {
+        if (signature !== props.getProperty(prefix + 'BROADCAST_SIGNATURE')) broadcastChanged = true;
+        props.setProperty(prefix + 'BROADCAST_SIGNATURE', signature);
       }
     });
     pending.forEach(function(item) { props.deleteProperty('PEND_' + item.chatId); });
@@ -211,7 +220,7 @@ function handleWorkflow(payload, props) {
   } finally {
     lock.releaseLock();
   }
-  if (changed) {
+  if (result.source === 'schedule' && broadcastChanged) {
     const report = formatReport(state);
     const pendingIds = pending.filter(function(item) { return item.view !== 'help'; })
       .map(function(item) { return item.chatId; });
