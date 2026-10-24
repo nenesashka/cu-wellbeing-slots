@@ -95,4 +95,14 @@ context.handleWorkflow({...payload, checked_at: values.LAST_WORKFLOW_CHECKED_AT,
   events: {...payload.events, lilia: {error: 'source_unavailable'}}}, props);
 assert.equal(sent.length, 0, 'duplicate workflow callback must be ignored');
 
+context.handleTelegram({update_id: 301, message: {chat: {id: 202, type: 'private'}, text: '/check'}}, props);
+sent.length = 0;
+context.handleWorkflow({...payload, checked_at: new Date(Date.now() + 2000).toISOString(),
+  events: {...payload.events, lilia: {error: 'source_unavailable'}}}, props);
+const completion = sent.filter(x => x.method === 'sendMessage');
+assert.equal(completion.length, 1);
+assert.match(completion[0].payload.text, /Не удалось обновить: Лилия Павлова/);
+assert.doesNotMatch(completion[0].payload.text, /16 ноября/,
+  'unchanged /check must not repeat the whole slot list');
+
 console.log('Apps Script integration tests passed');

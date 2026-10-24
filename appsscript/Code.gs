@@ -168,8 +168,12 @@ function handleWorkflow(payload, props) {
       safeSend(chatId, report, menuKeyboard());
     });
   } else {
+    const failed = EVENTS.filter(function(event) { return state[event.key].status === 'error'; })
+      .map(function(event) { return event.name; });
+    const summary = failed.length ? 'Проверка завершена. Не удалось обновить: ' + failed.join(', ') + '.' :
+      'Проверка завершена — изменений нет.';
     unique(pending).forEach(function(chatId) {
-      safeSend(chatId, 'Проверка завершена — изменений нет.\n\n' + formatReport(state), menuKeyboard());
+      safeSend(chatId, summary, menuKeyboard());
     });
   }
   maybeConfigureBotProfile(props);
@@ -206,7 +210,8 @@ function formatReport(state) {
 function formatEvent(event, item) {
   const heading = event.name + ' · ' + event.mode;
   if (!item || item.status === 'unknown') return heading + '\nДанные пока не получены.';
-  if (item.status === 'error') return heading + '\n⚠️ Не удалось обновить данные. Последние слоты могут быть устаревшими.';
+  if (item.status === 'error') return heading + '\n⚠️ Не удалось обновить данные.' +
+    (item.checkedAt ? ' Последняя успешная проверка: ' + dateLabel(item.checkedAt) + ' МСК.' : '');
   if (item.status === 'closed') return heading + '\nРегистрация пока закрыта.';
   if (!item.slots.length) return heading + '\nРегистрация открыта, свободных слотов сейчас нет.';
   const groups = {}, order = [];
