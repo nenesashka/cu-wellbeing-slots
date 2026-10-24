@@ -172,6 +172,7 @@ function handleWorkflow(payload, props) {
       safeSend(chatId, 'Проверка завершена — изменений нет.\n\n' + formatReport(state), menuKeyboard());
     });
   }
+  maybeConfigureBotProfile(props);
 }
 
 function readState(props) {
@@ -370,4 +371,14 @@ function configureBotProfile() {
   ]});
   telegramApi('setMyDescription', {description: 'CU CareSlot следит за записью к двум психологам ЦУ: Светлане Шутьковой (очно) и Лилии Павловой (онлайн). Бот дважды в день проверяет свободные даты и время и сообщает об изменениях. Команда /check запускает дополнительную проверку.', language_code: 'ru'});
   telegramApi('setMyShortDescription', {short_description: 'Свободное время к психологам ЦУ: Светлана очно, Лилия онлайн.', language_code: 'ru'});
+}
+
+function maybeConfigureBotProfile(props) {
+  if (props.getProperty('PROFILE_VERSION') === '2') return;
+  try {
+    configureBotProfile();
+    props.setProperty('PROFILE_VERSION', '2');
+  } catch (error) {
+    console.error('Bot profile update error: ' + String(error.status || error.name || 'Error'));
+  }
 }

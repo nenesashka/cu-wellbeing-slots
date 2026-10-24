@@ -54,6 +54,7 @@ assert.match(first.text, /Лилия Павлова · онлайн/);
 assert.match(first.text, /16 ноября 2030 — 11:15, 14:00/);
 assert.match(first.text, /Регистрация пока закрыта/);
 assert.equal(first.reply_markup.inline_keyboard[2][1].url, 'https://cu-events.timepad.ru/event/3558805/');
+assert.equal(sent.filter(x => x.method === 'setMyCommands').length, 1);
 
 sent.length = 0;
 context.handleWorkflow(payload, props);
