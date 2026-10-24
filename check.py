@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Check Timepad booking on a GitHub-hosted runner and notify one Telegram chat."""
+"""Fetch Timepad booking in the cloud and deliver results to the Telegram webhook."""
 
 import datetime as dt
-import hashlib
 import json
 import os
 import re
@@ -10,17 +9,13 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 EVENT_URL = "https://cu-events.timepad.ru/event/3219855/"
 TRANSLATE_URL = "https://translate.yandex.ru/translate?" + urllib.parse.urlencode(
     {"url": EVENT_URL, "lang": "ru-en"}
 )
-STATE_FILE = Path("state.json")
 MOSCOW = ZoneInfo("Europe/Moscow")
-MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня",
-          "июля", "августа", "сентября", "октября", "ноября", "декабря")
 
 
 def fetch_page():
@@ -66,53 +61,33 @@ def extract_slots(html, now=None):
     return sorted(slots, key=lambda slot: slot[1])
 
 
-def report(slots):
-    if not slots:
-        return "Сейчас доступных слотов к психологу нет.\n" + EVENT_URL
-    lines = ["Доступные слоты к психологу (МСК):"]
-    for _, start in slots:
-        lines.append(f"{start.day} {MONTHS[start.month - 1]}, {start:%H:%M}")
-    lines.append("Запись: " + EVENT_URL)
-    return "\n".join(lines)
-
-
-def signature(slots):
-    raw = "|".join(f"{slot_id}:{start.isoformat()}" for slot_id, start in slots)
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
-def send_telegram(message):
-    token = os.environ["BOT_TOKEN"]
-    chat_id = os.environ["CHAT_ID"]
-    data = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode()
+def deliver(payload):
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage", data=data, method="POST"
+        os.environ["DELIVERY_URL"], data=data,
+        headers={"Content-Type": "application/json"}, method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        result = json.load(response)
-        if response.status != 200 or result.get("ok") is not True:
-            raise RuntimeError("Telegram send failed")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            if response.status != 200 or response.read().strip() != b"ok":
+                raise RuntimeError("Result delivery rejected")
+    except urllib.error.HTTPError:
+        raise RuntimeError("Result delivery HTTP error") from None
 
 
 def main():
-    state = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
     try:
         slots = extract_slots(fetch_page())
-        current = signature(slots)
-        if os.environ.get("FORCE_REPORT") == "true" or state.get("error") or state.get("signature") != current:
-            send_telegram(report(slots))
-        state = {"signature": current, "error": False,
-                 "last_checked_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+        deliver({"checked_at": dt.datetime.now(dt.timezone.utc).isoformat(), "slots": [
+            {"id": slot_id, "start": start.isoformat()} for slot_id, start in slots
+        ]})
     except Exception as exc:
-        # Never print the bot token or private chat ID to workflow logs.
+        # Callback failures cannot be reported through the same callback.
         print(f"Check failed: {type(exc).__name__}", file=sys.stderr)
-        if not state.get("error"):
-            send_telegram("Не удалось проверить запись на Timepad. Повторю при следующем запуске.")
-        state["error"] = True
-        state["last_checked_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
-        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
-        raise
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+        if not isinstance(exc, RuntimeError) or not str(exc).startswith("Result delivery"):
+            deliver({"checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                     "error": "Timepad unavailable"})
+        raise RuntimeError("Appointment check failed") from None
     print(f"Check completed: {len(slots)} available slots")
 
 
