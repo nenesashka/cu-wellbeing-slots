@@ -1,0 +1,40 @@
+name: Check psychologist appointments
+on:
+  schedule:
+    # 09:07 and 21:07 Moscow time (UTC+3 year-round).
+    - cron: '7 6,18 * * *'
+  workflow_dispatch:
+    inputs:
+      force_report:
+        description: Send the current slot list even if unchanged
+        type: boolean
+        default: true
+permissions:
+  contents: write
+concurrency:
+  group: psychologist-slots
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.CHAT_ID }}
+      FORCE_REPORT: ${{ inputs.force_report || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Fetch Timepad and send Telegram update
+        run: python3 check.py
+      - name: Save last known state
+        if: always()
+        run: |
+          if [ ! -f state.json ]; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add state.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Save appointment check state'
+          git push
