@@ -62,54 +62,49 @@ assert.match(messages()[0].payload.text, /^Свободные слоты к пс
 assert.doesNotMatch(messages()[0].payload.text, /^CU CareSlot/);
 assert.match(messages()[0].payload.text, /16 ноября 2030 — 11:15, 14:00/);
 assert.match(messages()[0].payload.text, /Лилия Павлова · онлайн\nРегистрация пока закрыта/);
-assert.equal(messages()[0].payload.reply_markup.inline_keyboard[2][0].text, 'Страница Светланы');
-assert.equal(messages()[0].payload.reply_markup.inline_keyboard[3][0].text, 'Страница Лилии');
+const mainButtons = messages()[0].payload.reply_markup.inline_keyboard;
+assert.equal(mainButtons[1][0].text, 'Страница Светланы');
+assert.equal(mainButtons[2][0].text, 'Страница Лилии');
+assert.equal(mainButtons[3][0].callback_data, 'help');
+assert.equal(mainButtons.flat().some(button => ['svetlana', 'lilia'].includes(button.callback_data)), false);
 assert.equal(calls.filter(x => x.method === 'setMyCommands').length, 1);
 calls.length = 0;
 context.handleWorkflow(base, props);
 assert.equal(calls.length, 0, 'duplicate workflow result stays quiet');
 
-// Any user can subscribe. Navigation buttons edit the same message.
+// Any user can subscribe. Help and Back edit the same message.
 context.handleTelegram({update_id: 298, message: {chat: {id: 303, type: 'private'}, text: '/start'}}, props);
 assert.equal(values.SUB_303, '1');
 const menuId = messages()[0].result.message_id;
 calls.length = 0;
-context.handleTelegram({update_id: 299, callback_query: {id: 'view-lilia', data: 'lilia',
+context.handleTelegram({update_id: 299, callback_query: {id: 'view-help', data: 'help',
   message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
 assert.equal(calls[0].method, 'answerCallbackQuery');
 assert.equal(edits().length, 1);
 assert.equal(messages().length, 0);
 assert.equal(edits()[0].payload.message_id, menuId);
-assert.match(edits()[0].payload.text, /^Лилия Павлова · онлайн/);
-assert.doesNotMatch(edits()[0].payload.text, /Светлана Шутькова/);
-assert.equal(edits()[0].payload.reply_markup.inline_keyboard[0][0].text, 'Страница Лилии');
-
-for (const [updateId, data, expected] of [
-  [2991, 'help', /^Как пользоваться ботом/],
-  [2992, 'all', /^Свободные слоты к психологам/],
-  [2993, 'lilia', /^Лилия Павлова · онлайн/]
-]) {
-  calls.length = 0;
-  context.handleTelegram({update_id: updateId, callback_query: {id: `navigation-${updateId}`, data,
-    message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
-  assert.equal(messages().length, 0);
-  assert.equal(edits().length, 1);
-  assert.equal(edits()[0].payload.message_id, menuId);
-  assert.match(edits()[0].payload.text, expected);
-}
+assert.match(edits()[0].payload.text, /^Как пользоваться ботом/);
+assert.equal(edits()[0].payload.reply_markup.inline_keyboard[0][0].callback_data, 'all');
+calls.length = 0;
+context.handleTelegram({update_id: 2991, callback_query: {id: 'back-to-slots', data: 'all',
+  message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
+assert.equal(messages().length, 0);
+assert.equal(edits().length, 1);
+assert.equal(edits()[0].payload.message_id, menuId);
+assert.match(edits()[0].payload.text, /^Свободные слоты к психологам/);
 
 // Checking from an inline button edits that message, then edits it again with fresh data.
 calls.length = 0;
-context.handleTelegram({update_id: 300, callback_query: {id: 'check-lilia', data: 'check_lilia',
+context.handleTelegram({update_id: 300, callback_query: {id: 'check-slots', data: 'check',
   message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
 assert.equal(dispatches, 1);
 assert.equal(edits().length, 1);
 assert.equal(messages().length, 0);
 assert.match(edits()[0].payload.text, /Проверяю страницы/);
 assert.equal(JSON.parse(values.PEND_303).messageId, menuId);
-assert.equal(JSON.parse(values.PEND_303).view, 'lilia');
+assert.equal(JSON.parse(values.PEND_303).view, 'all');
 const callCount = calls.length;
-context.handleTelegram({update_id: 300, callback_query: {id: 'check-lilia', data: 'check_lilia',
+context.handleTelegram({update_id: 300, callback_query: {id: 'check-slots', data: 'check',
   message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
 assert.equal(calls.length, callCount + 1, 'duplicate callback is acknowledged but not processed');
 assert.equal(dispatches, 1);
@@ -124,7 +119,7 @@ assert.equal(edits().length, 1, 'requester sees the existing message updated');
 assert.equal(edits()[0].payload.chat_id, '303');
 assert.equal(edits()[0].payload.message_id, menuId);
 assert.match(edits()[0].payload.text, /Лилия Павлова · онлайн\n17 ноября 2030 — 16:30/);
-assert.doesNotMatch(edits()[0].payload.text, /Светлана Шутькова/);
+assert.match(edits()[0].payload.text, /Светлана Шутькова/);
 assert.doesNotMatch(edits()[0].payload.text, /Проверяю страницы/);
 
 // A typed /check gets one bot message, which is edited after an unchanged check.

@@ -93,7 +93,7 @@ function handleTelegram(update, props) {
   if (action === '/stop') {
     sendTelegram(chatId, 'Уведомления отключены. Проверять слоты вручную можно командой /check. Чтобы снова подписаться, отправьте /start.', menuKeyboard());
   } else if (action === '/help') {
-    sendTelegram(chatId, helpText(), menuKeyboard());
+    sendTelegram(chatId, helpText(), helpKeyboard());
   } else if (action === '/start') {
     const sentId = sendTelegram(chatId, welcomeText() + '\n\n' + formatReport(state) +
       (requestCheck ? '\n\nПроверяю страницы…' : ''), menuKeyboard());
@@ -250,7 +250,7 @@ function welcomeText() {
 }
 
 function helpText() {
-  return 'Как пользоваться ботом\n\nНажмите «Обновить», чтобы проверить обе записи. Кнопки с именами покажут слоты каждого психолога прямо в этом сообщении.\n\n/check — проверить обе записи\n/svetlana — очно\n/lilia — онлайн\n/start — включить уведомления\n/stop — отключить уведомления\n\nВремя московское. Запись оформляется на Timepad.';
+  return 'Как пользоваться ботом\n\nНа главном экране показаны свободные слоты обоих психологов. Нажмите «Обновить», чтобы проверить запись ещё раз. Кнопки «Страница Светланы» и «Страница Лилии» открывают Timepad для записи.\n\n/check — проверить обе записи\n/start — включить уведомления\n/stop — отключить уведомления\n\nВремя московское.';
 }
 
 function formatReport(state) {
@@ -287,7 +287,7 @@ function formatEvent(event, item) {
 }
 
 function viewMessage(view, state) {
-  if (view === 'help') return {text: helpText(), keyboard: menuKeyboard()};
+  if (view === 'help') return {text: helpText(), keyboard: helpKeyboard()};
   if (view === 'svetlana' || view === 'lilia') {
     const event = EVENTS[view === 'lilia' ? 1 : 0];
     const item = state[event.key];
@@ -303,11 +303,14 @@ function viewMessage(view, state) {
 function menuKeyboard() {
   return {inline_keyboard: [
     [{text: 'Обновить', callback_data: 'check'}],
-    [{text: 'Светлана', callback_data: 'svetlana'}, {text: 'Лилия', callback_data: 'lilia'}],
     [{text: 'Страница Светланы', url: EVENTS[0].url}],
     [{text: 'Страница Лилии', url: EVENTS[1].url}],
     [{text: 'Как это работает', callback_data: 'help'}]
   ]};
+}
+
+function helpKeyboard() {
+  return {inline_keyboard: [[{text: '← К слотам', callback_data: 'all'}]]};
 }
 
 function eventKeyboard(event) {
