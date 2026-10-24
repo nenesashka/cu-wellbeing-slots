@@ -1,94 +1,107 @@
 #!/usr/bin/env python3
-"""Fetch Timepad booking in the cloud and deliver results to the Telegram webhook."""
+"""Check both CU psychologists on Timepad and deliver one atomic result."""
 
+import concurrent.futures
 import datetime as dt
 import json
 import os
 import re
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
 
-EVENT_URL = "https://cu-events.timepad.ru/event/3219855/"
-TRANSLATE_URL = "https://translate.yandex.ru/translate?" + urllib.parse.urlencode(
-    {"url": EVENT_URL, "lang": "ru-en"}
-)
 MOSCOW = ZoneInfo("Europe/Moscow")
+EVENTS = {
+    "svetlana": 3219855,
+    "lilia": 3558805,
+}
+DATA_PATTERN = re.compile(r"\(function\(\)\{\s*return\s+(\{[\s\S]*?\});\s*\}\)\(\)")
 
 
-def fetch_page():
-    try:
-        return fetch_url(EVENT_URL)
-    except urllib.error.HTTPError as error:
-        if error.code != 403:
-            raise
-        # Timepad rejects GitHub-hosted IP addresses. Yandex's translated view
-        # preserves the embedded registration data and is reachable from GitHub.
-        return fetch_url(TRANSLATE_URL)
-
-
-def fetch_url(url):
+def fetch_url(url, timeout):
     request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; AppointmentWatcher/1.0)"},
+        url, headers={"User-Agent": "Mozilla/5.0 (compatible; CareSlot/2.0)"}
     )
-    with urllib.request.urlopen(request, timeout=80) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         if response.status != 200:
             raise RuntimeError(f"Source HTTP {response.status}")
         return response.read().decode("utf-8")
 
 
-def extract_slots(html, now=None):
-    match = re.search(r"\(function\(\)\{\s*return\s+(\{[\s\S]*?\});\s*\}\)\(\)", html)
+def parse_event(html, event_id, now=None):
+    match = DATA_PATTERN.search(html)
     if not match:
-        raise RuntimeError("Timepad registration data unavailable")
+        raise ValueError("Timepad registration data unavailable")
     data = json.loads(match.group(1))
+    if data.get("id") != event_id:
+        raise ValueError("Wrong Timepad event")
+    registration_open = data.get("reg_open")
     entries = data.get("recurring_events")
-    if not isinstance(entries, list):
-        raise RuntimeError("Timepad slot list unavailable")
+    if not isinstance(registration_open, bool) or not isinstance(entries, list):
+        raise ValueError("Incomplete Timepad registration data")
+
     now = now or dt.datetime.now(dt.timezone.utc)
     slots = []
-    for entry in entries:
-        if entry.get("unavaliable") is not False or int(entry.get("tickets_left") or 0) < 1:
+    if registration_open:
+        for entry in entries:
+            if entry.get("unavaliable") is not False or int(entry.get("tickets_left") or 0) < 1:
+                continue
+            start = dt.datetime.fromisoformat(entry["date_iso8601"].replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                raise ValueError("Timepad slot has no timezone")
+            if start > now:
+                slots.append({"id": str(entry["id"]), "start": start.astimezone(MOSCOW).isoformat()})
+    slots.sort(key=lambda slot: slot["start"])
+    return {"registration_open": registration_open, "slots": slots}
+
+
+def check_event(name, event_id):
+    event_url = f"https://cu-events.timepad.ru/event/{event_id}/"
+    translated_url = "https://translate.yandex.ru/translate?" + urllib.parse.urlencode(
+        {"url": event_url, "lang": "ru-en"}
+    )
+    # Timepad often blocks hosted runners. A short direct attempt keeps /check
+    # responsive, then Yandex's translated page supplies the embedded data.
+    for url, timeout in ((event_url, 12), (translated_url, 35)):
+        try:
+            return parse_event(fetch_url(url, timeout), event_id)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
             continue
-        start = dt.datetime.fromisoformat(entry["date_iso8601"].replace("Z", "+00:00"))
-        if start.tzinfo is None:
-            raise RuntimeError("Timepad slot has no timezone")
-        if start > now:
-            slots.append((str(entry["id"]), start.astimezone(MOSCOW)))
-    return sorted(slots, key=lambda slot: slot[1])
+    raise RuntimeError(f"Could not check {name}")
 
 
 def deliver(payload):
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        os.environ["DELIVERY_URL"], data=data,
-        headers={"Content-Type": "application/json"}, method="POST",
+        os.environ["DELIVERY_URL"],
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            if response.status != 200 or response.read().strip() != b"ok":
-                raise RuntimeError("Result delivery rejected")
-    except urllib.error.HTTPError:
-        raise RuntimeError("Result delivery HTTP error") from None
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if response.status != 200 or response.read().strip() != b"ok":
+            raise RuntimeError("Result delivery rejected")
 
 
 def main():
-    try:
-        slots = extract_slots(fetch_page())
-        deliver({"checked_at": dt.datetime.now(dt.timezone.utc).isoformat(), "slots": [
-            {"id": slot_id, "start": start.isoformat()} for slot_id, start in slots
-        ]})
-    except Exception as exc:
-        # Callback failures cannot be reported through the same callback.
-        print(f"Check failed: {type(exc).__name__}", file=sys.stderr)
-        if not isinstance(exc, RuntimeError) or not str(exc).startswith("Result delivery"):
-            deliver({"checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                     "error": "Timepad unavailable"})
-        raise RuntimeError("Appointment check failed") from None
-    print(f"Check completed: {len(slots)} available slots")
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(EVENTS)) as pool:
+        futures = {pool.submit(check_event, name, event_id): name for name, event_id in EVENTS.items()}
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                results[name] = future.result()
+            except Exception as exc:
+                # Do not print page content, callback URLs, or credentials.
+                print(f"{name} check failed: {type(exc).__name__}", file=sys.stderr)
+                results[name] = {"error": "source_unavailable"}
+
+    deliver({"checked_at": dt.datetime.now(dt.timezone.utc).isoformat(), "events": results})
+    if any("error" in result for result in results.values()):
+        raise RuntimeError("One or more appointment checks failed")
+    print("Check completed: " + ", ".join(
+        f"{name}={len(results[name]['slots'])}" for name in EVENTS
+    ))
 
 
 if __name__ == "__main__":
