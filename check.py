@@ -14,6 +14,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 EVENT_URL = "https://cu-events.timepad.ru/event/3219855/"
+TRANSLATE_URL = "https://translate.yandex.ru/translate?" + urllib.parse.urlencode(
+    {"url": EVENT_URL, "lang": "ru-en"}
+)
 STATE_FILE = Path("state.json")
 MOSCOW = ZoneInfo("Europe/Moscow")
 MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня",
@@ -21,13 +24,24 @@ MONTHS = ("января", "февраля", "марта", "апреля", "ма�
 
 
 def fetch_page():
+    try:
+        return fetch_url(EVENT_URL)
+    except urllib.error.HTTPError as error:
+        if error.code != 403:
+            raise
+        # Timepad rejects GitHub-hosted IP addresses. Yandex's translated view
+        # preserves the embedded registration data and is reachable from GitHub.
+        return fetch_url(TRANSLATE_URL)
+
+
+def fetch_url(url):
     request = urllib.request.Request(
-        EVENT_URL,
+        url,
         headers={"User-Agent": "Mozilla/5.0 (compatible; AppointmentWatcher/1.0)"},
     )
     with urllib.request.urlopen(request, timeout=80) as response:
         if response.status != 200:
-            raise RuntimeError(f"Timepad HTTP {response.status}")
+            raise RuntimeError(f"Source HTTP {response.status}")
         return response.read().decode("utf-8")
 
 
