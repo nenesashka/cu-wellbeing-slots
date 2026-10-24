@@ -84,7 +84,9 @@ def deliver(payload):
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
+    # A changed slot list can fan out to hundreds of subscribers in Apps Script.
+    # Allow that paced broadcast to finish before treating the callback as lost.
+    with urllib.request.urlopen(request, timeout=270) as response:
         if response.status != 200 or response.read().strip() != b"ok":
             raise RuntimeError("Result delivery rejected")
 

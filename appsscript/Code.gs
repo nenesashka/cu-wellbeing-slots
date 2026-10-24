@@ -1,6 +1,7 @@
 /** CU CareSlot: Telegram webhook, subscriber store, and two-event results. */
 const GITHUB_DISPATCH_URL = 'https://api.github.com/repos/nenesashka/cu-wellbeing-slots/actions/workflows/check.yml/dispatches';
 const MOSCOW_TZ = 'Europe/Moscow';
+const BROADCAST_BATCH_SIZE = 12;
 const EVENTS = [
   {key: 'svetlana', name: 'Светлана Шутькова', mode: 'очно · кабинет 406', url: 'https://cu-events.timepad.ru/event/3219855/'},
   {key: 'lilia', name: 'Лилия Павлова', mode: 'онлайн', url: 'https://cu-events.timepad.ru/event/3558805/'}
@@ -214,9 +215,8 @@ function handleWorkflow(payload, props) {
     const report = formatReport(state);
     const pendingIds = pending.filter(function(item) { return item.view !== 'help'; })
       .map(function(item) { return item.chatId; });
-    subscribers.filter(function(chatId) { return pendingIds.indexOf(chatId) < 0; }).forEach(function(chatId) {
-      safeSend(chatId, report, menuKeyboard());
-    });
+    broadcastTelegram(subscribers.filter(function(chatId) { return pendingIds.indexOf(chatId) < 0; }),
+      report, menuKeyboard());
   }
   pending.forEach(function(item) { deliverPending(item, state); });
   maybeConfigureBotProfile(props);
@@ -329,7 +329,7 @@ function dispatchCheck(props) {
   if (!token) throw new Error('GitHub token unavailable');
   const response = UrlFetchApp.fetch(GITHUB_DISPATCH_URL, {
     method: 'post', contentType: 'application/json', payload: JSON.stringify({ref: 'main'}),
-    muteHttpExceptions: true,
+    muteHttpExceptions: true, timeoutSeconds: 15,
     headers: {'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'User-Agent': 'CareSlot'}
   });
   if (response.getResponseCode() !== 204) throw new Error('GitHub dispatch failed');
@@ -361,10 +361,14 @@ function telegramApi(method, payload) {
   let response;
   for (let attempt = 0; attempt < 2; attempt++) {
     response = UrlFetchApp.fetch('https://api.telegram.org/bot' + token + '/' + method, {
-      method: 'post', contentType: 'application/json', payload: JSON.stringify(payload), muteHttpExceptions: true
+      method: 'post', contentType: 'application/json', payload: JSON.stringify(payload),
+      muteHttpExceptions: true, timeoutSeconds: 15
     });
     if (response.getResponseCode() !== 429) break;
-    Utilities.sleep(1500);
+    let retryAfter = 1;
+    try { retryAfter = Number(JSON.parse(response.getContentText()).parameters.retry_after) || 1; }
+    catch (parseError) { retryAfter = 1; }
+    Utilities.sleep(Math.min(10000, Math.max(1000, retryAfter * 1000)));
   }
   if (response.getResponseCode() !== 200) {
     const error = new Error('Telegram API failed');
@@ -376,7 +380,7 @@ function telegramApi(method, payload) {
   return JSON.parse(response.getContentText());
 }
 
-function sendTelegram(chatId, message, keyboard) {
+function splitMessage(message) {
   const lines = String(message).split('\n');
   const pieces = [];
   let part = '';
@@ -390,6 +394,11 @@ function sendTelegram(chatId, message, keyboard) {
     part += (part ? '\n' : '') + line;
   });
   if (part) pieces.push(part);
+  return pieces;
+}
+
+function sendTelegram(chatId, message, keyboard) {
+  const pieces = splitMessage(message);
   let lastMessageId = 0;
   pieces.forEach(function(piece, index) {
     const payload = {chat_id: chatId, text: piece, disable_web_page_preview: true};
@@ -398,6 +407,57 @@ function sendTelegram(chatId, message, keyboard) {
     lastMessageId = Number(response.result && response.result.message_id || 0);
   });
   return lastMessageId;
+}
+
+function broadcastTelegram(chatIds, message, keyboard) {
+  const recipients = unique(chatIds);
+  if (recipients.length <= BROADCAST_BATCH_SIZE) {
+    recipients.forEach(function(chatId) { safeSend(chatId, message, keyboard); });
+    return;
+  }
+  const token = PropertiesService.getScriptProperties().getProperty('BOT_TOKEN');
+  if (!token) throw new Error('Bot token unavailable');
+  const url = 'https://api.telegram.org/bot' + token + '/sendMessage';
+  const pieces = splitMessage(message);
+  for (let offset = 0; offset < recipients.length; offset += BROADCAST_BATCH_SIZE) {
+    const batch = recipients.slice(offset, offset + BROADCAST_BATCH_SIZE);
+    pieces.forEach(function(piece, partIndex) {
+      const partKeyboard = partIndex === pieces.length - 1 ? keyboard : null;
+      const requests = batch.map(function(chatId) {
+        const payload = {chat_id: chatId, text: piece, disable_web_page_preview: true};
+        if (partKeyboard) payload.reply_markup = partKeyboard;
+        return {url: url, method: 'post', contentType: 'application/json',
+          payload: JSON.stringify(payload), muteHttpExceptions: true, timeoutSeconds: 15};
+      });
+      let responses;
+      try { responses = UrlFetchApp.fetchAll(requests); }
+      catch (error) {
+        console.error('Broadcast batch error: ' + String(error.name || 'Error'));
+        batch.forEach(function(chatId) { safeSend(chatId, piece, partKeyboard); });
+        return;
+      }
+      responses.forEach(function(response, index) {
+        const status = response.getResponseCode();
+        if (status === 200) return;
+        if (status === 403) {
+          PropertiesService.getScriptProperties().deleteProperty('SUB_' + batch[index]);
+          return;
+        }
+        if (status === 429) {
+          let retryAfter = 1;
+          try { retryAfter = Number(JSON.parse(response.getContentText()).parameters.retry_after) || 1; }
+          catch (parseError) { retryAfter = 1; }
+          Utilities.sleep(Math.min(10000, Math.max(1000, retryAfter * 1000)));
+        }
+        safeSend(batch[index], piece, partKeyboard);
+      });
+      // Telegram's free broadcast limit is about 30 messages/s. Keep room for
+      // commands arriving at the webhook while a broadcast is in progress.
+      if (offset + batch.length < recipients.length || partIndex < pieces.length - 1) {
+        Utilities.sleep(1000);
+      }
+    });
+  }
 }
 
 function editTelegram(chatId, messageId, message, keyboard) {

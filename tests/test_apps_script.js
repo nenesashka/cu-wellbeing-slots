@@ -136,4 +136,23 @@ assert.equal(edits().length, 1);
 assert.equal(edits()[0].payload.message_id, commandMessageId);
 assert.doesNotMatch(edits()[0].payload.text, /Проверяю страницы/);
 
+// Simulate a broadcast to 700 subscribers without sending real Telegram messages.
+values.BOT_TOKEN = 'test-token';
+const batches = [];
+const pauses = [];
+context.Utilities.sleep = ms => { pauses.push(ms); };
+context.UrlFetchApp = {fetchAll(requests) {
+  batches.push(requests);
+  return requests.map(() => ({getResponseCode: () => 200}));
+}};
+calls.length = 0;
+context.broadcastTelegram(Array.from({length: 700}, (_, i) => String(1000 + i)),
+  'Свободные слоты к психологам', context.menuKeyboard());
+assert.equal(batches.length, Math.ceil(700 / 12));
+assert.equal(batches.reduce((sum, batch) => sum + batch.length, 0), 700);
+assert(batches.every(batch => batch.length <= 12 && batch.every(request => request.timeoutSeconds === 15)));
+assert.equal(pauses.length, batches.length - 1);
+assert(pauses.every(ms => ms >= 1000));
+assert.equal(messages().length, 0, 'large broadcast uses paced batches');
+
 console.log('Apps Script integration tests passed');
