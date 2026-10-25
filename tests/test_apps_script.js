@@ -67,6 +67,15 @@ context.handleTelegram({update_id: 2, message: {chat: {id: 999, type: 'private'}
 assert.equal(values.PRIORITY_CHAT_ID, '101', 'a second chat cannot replace the owner');
 assert.match(messages()[0].payload.text, /Не удалось включить приоритет/);
 calls.length = 0;
+context.handleTelegram({update_id: 3, message: {chat: {id: 101, type: 'private'},
+  text: '/stats'}}, props);
+assert.match(messages()[0].payload.text, /Активных подписчиков: 1/);
+assert.equal(dispatches, 0, 'stats must not launch a slot check');
+calls.length = 0;
+context.handleTelegram({update_id: 4, message: {chat: {id: 999, type: 'private'},
+  text: '/stats'}}, props);
+assert.equal(messages()[0].payload.text, 'Команда недоступна.');
+calls.length = 0;
 const now = new Date();
 const checkedAt = seconds => new Date(now.getTime() + seconds * 1000).toISOString();
 const base = {
@@ -118,6 +127,10 @@ assert.equal(calls.length, 0, 'duplicate workflow result stays quiet');
 context.handleTelegram({update_id: 298, message: {chat: {id: 303, type: 'private'}, text: '/start'}}, props);
 assert.equal(values.SUB_303, '1');
 const menuId = messages()[0].result.message_id;
+calls.length = 0;
+context.handleTelegram({update_id: 2981, message: {chat: {id: 101, type: 'private'},
+  text: '/stats'}}, props);
+assert.match(messages()[0].payload.text, /Активных подписчиков: 2/);
 calls.length = 0;
 context.handleTelegram({update_id: 299, callback_query: {id: 'view-help', data: 'help',
   message: {chat: {id: 303, type: 'private'}, message_id: menuId}}}, props);
@@ -220,5 +233,11 @@ assert(batches.every(batch => batch.length <= 12 && batch.every(request => reque
 assert.equal(pauses.length, batches.length - 1);
 assert(pauses.every(ms => ms >= 1000));
 assert.equal(messages().length, 0, 'large broadcast uses paced batches');
+
+calls.length = 0;
+context.handleTelegram({update_id: 500, message: {chat: {id: 303, type: 'private'}, text: '/stop'}}, props);
+context.handleTelegram({update_id: 501, message: {chat: {id: 101, type: 'private'}, text: '/stats'}}, props);
+assert.match(messages()[1].payload.text, /Активных подписчиков: 1/,
+  'the count drops when a user disables notifications');
 
 console.log('Apps Script integration tests passed');

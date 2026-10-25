@@ -44,7 +44,7 @@ function handleTelegram(update, props) {
   const action = callback ? String(callback.data || '') :
     rawText.split(/\s+/)[0].split('@')[0];
   const allowed = ['/start', '/check', '/help', '/stop', '/svetlana', '/lilia',
-    '/priority', 'check', 'check_svetlana', 'check_lilia', 'all', 'svetlana', 'lilia', 'help'];
+    '/priority', '/stats', 'check', 'check_svetlana', 'check_lilia', 'all', 'svetlana', 'lilia', 'help'];
   const checkView = action === 'check_svetlana' ? 'svetlana' :
     action === 'check_lilia' ? 'lilia' : 'all';
   const isCheck = action === '/check' || action === 'check' ||
@@ -55,6 +55,7 @@ function handleTelegram(update, props) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   let state, dispatchNeeded = false, requestCheck = false, priorityActivated = false;
+  let subscriberCount = null;
   try {
     const seen = JSON.parse(props.getProperty('RECENT_UPDATES') || '[]');
     const updateId = String(update.update_id);
@@ -75,6 +76,11 @@ function handleTelegram(update, props) {
     if (action === '/stop') {
       props.deleteProperty('SUB_' + chatId);
       props.deleteProperty('PEND_' + chatId);
+    }
+    if (action === '/stats' && props.getProperty('PRIORITY_CHAT_ID') === chatId) {
+      subscriberCount = Object.keys(props.getProperties()).filter(function(key) {
+        return /^SUB_\d+$/.test(key);
+      }).length;
     }
     state = readState(props);
     requestCheck = isCheck ||
@@ -109,6 +115,12 @@ function handleTelegram(update, props) {
       'Приоритетные уведомления включены. При изменении слотов я напишу тебе первым; общая рассылка начнётся не раньше чем через час.' :
       'Не удалось включить приоритет. Проверь команду и код.', menuKeyboard());
     if (priorityActivated) startPriorityDelivery(props);
+    return;
+  }
+
+  if (action === '/stats') {
+    sendTelegram(chatId, subscriberCount === null ? 'Команда недоступна.' :
+      'Активных подписчиков: ' + subscriberCount + '.\n\nЭто число чатов с включёнными уведомлениями. Команды /check без подписки сюда не входят.');
     return;
   }
 
