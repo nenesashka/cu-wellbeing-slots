@@ -36,7 +36,8 @@ const context = {
         timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
       }).formatToParts(date).map(x => [x.type, x.value]));
-      return ({'yyyy-MM-dd': `${p.year}-${p.month}-${p.day}`, d: String(Number(p.day)),
+      return ({'yyyy-MM-dd': `${p.year}-${p.month}-${p.day}`,
+        yyyyMMdd: `${p.year}${p.month}${p.day}`, d: String(Number(p.day)),
         M: String(Number(p.month)), yyyy: p.year, 'HH:mm': `${p.hour}:${p.minute}`,
         'dd.MM.yyyy HH:mm': `${p.day}.${p.month}.${p.year} ${p.hour}:${p.minute}`})[format];
     }
@@ -70,6 +71,7 @@ calls.length = 0;
 context.handleTelegram({update_id: 3, message: {chat: {id: 101, type: 'private'},
   text: '/stats'}}, props);
 assert.match(messages()[0].payload.text, /Активных подписчиков: 1/);
+const adminMessageId = messages()[0].result.message_id;
 assert.equal(dispatches, 0, 'stats must not launch a slot check');
 calls.length = 0;
 context.handleTelegram({update_id: 4, message: {chat: {id: 999, type: 'private'},
@@ -78,6 +80,7 @@ assert.equal(messages()[0].payload.text, 'Команда недоступна.')
 calls.length = 0;
 const now = new Date();
 const checkedAt = seconds => new Date(now.getTime() + seconds * 1000).toISOString();
+assert.equal(context.scheduledDelayMs('2026-10-25T06:39:14Z'), (32 * 60 + 14) * 1000);
 const base = {
   checked_at: checkedAt(0),
   source: 'schedule',
@@ -124,7 +127,8 @@ context.handleWorkflow(base, props);
 assert.equal(calls.length, 0, 'duplicate workflow result stays quiet');
 
 // Any user can subscribe. Help and Back edit the same message.
-context.handleTelegram({update_id: 298, message: {chat: {id: 303, type: 'private'}, text: '/start'}}, props);
+context.handleTelegram({update_id: 298, message: {chat: {id: 303, type: 'private'},
+  from: {id: 303, username: 'student303'}, text: '/start'}}, props);
 assert.equal(values.SUB_303, '1');
 const menuId = messages()[0].result.message_id;
 calls.length = 0;
@@ -217,6 +221,7 @@ assert.deepEqual(messages().map(x => x.payload.chat_id), ['303']);
 
 // Simulate a broadcast to 700 subscribers without sending real Telegram messages.
 values.BOT_TOKEN = 'test-token';
+values.GITHUB_TOKEN = 'test-token';
 const batches = [];
 const pauses = [];
 context.Utilities.sleep = ms => { pauses.push(ms); };
@@ -235,9 +240,70 @@ assert(pauses.every(ms => ms >= 1000));
 assert.equal(messages().length, 0, 'large broadcast uses paced batches');
 
 calls.length = 0;
-context.handleTelegram({update_id: 500, message: {chat: {id: 303, type: 'private'}, text: '/stop'}}, props);
+context.handleTelegram({update_id: 500, message: {chat: {id: 303, type: 'private'},
+  from: {id: 303, username: 'student303'}, text: '/stop'}}, props);
 context.handleTelegram({update_id: 501, message: {chat: {id: 101, type: 'private'}, text: '/stats'}}, props);
 assert.match(messages()[1].payload.text, /Активных подписчиков: 1/,
   'the count drops when a user disables notifications');
+
+calls.length = 0;
+const failed = {...changedAgain, checked_at: checkedAt(7), source: 'workflow_dispatch',
+  events: {...changedAgain.events, lilia: {error: 'source_unavailable'}}};
+context.handleWorkflow(failed, props);
+context.handleTelegram({update_id: 502, callback_query: {id: 'admin-errors',
+  from: {id: 101}, data: 'admin_errors',
+  message: {chat: {id: 101, type: 'private'}, message_id: adminMessageId}}}, props);
+assert.equal(messages().length, 0, 'admin navigation edits the current message');
+assert.equal(edits().length, 1);
+assert.match(edits()[0].payload.text, /Лилия Павлова/);
+assert.match(edits()[0].payload.text, /Сегодня: 1/);
+calls.length = 0;
+context.handleTelegram({update_id: 5021, callback_query: {id: 'admin-checks',
+  from: {id: 101}, data: 'admin_checks',
+  message: {chat: {id: 101, type: 'private'}, message_id: adminMessageId}}}, props);
+assert.match(edits()[0].payload.text, /Запросов на ручную проверку: 2/);
+assert.match(edits()[0].payload.text, /Ошибок источников: 1/);
+
+context.UrlFetchApp.fetch = () => ({getResponseCode: () => 200, getContentText: () =>
+  JSON.stringify({workflow_runs: [{created_at: checkedAt(0), event: 'schedule',
+    conclusion: 'failure', status: 'completed'}]})});
+calls.length = 0;
+context.handleTelegram({update_id: 5022, callback_query: {id: 'admin-cloud',
+  from: {id: 101}, data: 'admin_cloud',
+  message: {chat: {id: 101, type: 'private'}, message_id: adminMessageId}}}, props);
+assert.match(edits()[0].payload.text, /Неудачных среди последних 1: 1/);
+
+calls.length = 0;
+context.handleTelegram({update_id: 503, callback_query: {id: 'admin-users',
+  from: {id: 101}, data: 'admin_users_0',
+  message: {chat: {id: 101, type: 'private'}, message_id: adminMessageId}}}, props);
+assert.match(edits()[0].payload.text, /@student303/);
+assert.match(edits()[0].payload.text, /🔕/);
+for (let index = 0; index < 20; index++) {
+  values['USR_' + (1000 + index)] = JSON.stringify({username: 'reader_' + index,
+    firstSeen: checkedAt(0), lastSeen: checkedAt(index)});
+}
+calls.length = 0;
+context.handleTelegram({update_id: 5031, callback_query: {id: 'admin-users-next',
+  from: {id: 101}, data: 'admin_users_1',
+  message: {chat: {id: 101, type: 'private'}, message_id: adminMessageId}}}, props);
+assert.match(edits()[0].payload.text, /Пользователи · 2\/2/);
+assert.equal(messages().length, 0);
+for (let index = 0; index < 700; index++) {
+  values['USR_' + (2000 + index)] = JSON.stringify({username: 'member_' + index,
+    firstSeen: checkedAt(0), lastSeen: checkedAt(0)});
+}
+const lastPage = Math.ceil(context.adminSnapshot(props).users.length / 15) - 1;
+calls.length = 0;
+context.handleTelegram({update_id: 5032, callback_query: {id: 'admin-users-last',
+  from: {id: 101}, data: 'admin_users_' + lastPage,
+  message: {chat: {id: 101, type: 'private'}, message_id: adminMessageId}}}, props);
+assert.match(edits()[0].payload.text, new RegExp('Пользователи · ' + (lastPage + 1) + '/' + (lastPage + 1)));
+assert(edits()[0].payload.text.length < 3900, 'large user directory fits in one Telegram message');
+calls.length = 0;
+context.handleTelegram({update_id: 504, callback_query: {id: 'admin-denied',
+  from: {id: 999}, data: 'admin_users_0',
+  message: {chat: {id: 999, type: 'private'}, message_id: adminMessageId}}}, props);
+assert.equal(edits().length, 0, 'other users cannot open admin pages');
 
 console.log('Apps Script integration tests passed');

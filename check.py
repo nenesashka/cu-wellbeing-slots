@@ -92,6 +92,7 @@ def deliver(payload):
 
 
 def main():
+    started_at = dt.datetime.now(dt.timezone.utc).isoformat()
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(EVENTS)) as pool:
         futures = {pool.submit(check_event, name, event_id): name for name, event_id in EVENTS.items()}
@@ -104,7 +105,8 @@ def main():
                 print(f"{name} check failed: {type(exc).__name__}", file=sys.stderr)
                 results[name] = {"error": "source_unavailable"}
 
-    deliver({"checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    deliver({"started_at": started_at,
+             "checked_at": dt.datetime.now(dt.timezone.utc).isoformat(),
              "source": os.environ.get("CHECK_SOURCE", ""), "events": results})
     if any("error" in result for result in results.values()):
         raise RuntimeError("One or more appointment checks failed")

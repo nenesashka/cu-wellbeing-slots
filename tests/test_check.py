@@ -55,6 +55,8 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(set(delivered[0]["events"]), {"svetlana", "lilia"})
         self.assertEqual(delivered[0]["events"]["lilia"], {"error": "source_unavailable"})
         self.assertEqual(delivered[0]["source"], "workflow_dispatch")
+        self.assertLessEqual(dt.datetime.fromisoformat(delivered[0]["started_at"]),
+                             dt.datetime.fromisoformat(delivered[0]["checked_at"]))
 
 
 if __name__ == "__main__":
