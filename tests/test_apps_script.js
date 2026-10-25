@@ -14,10 +14,20 @@ const props = {
 const calls = [];
 let nextMessageId = 500;
 let dispatches = 0;
+const triggers = [];
 const context = {
   console,
   PropertiesService: {getScriptProperties: () => props},
   LockService: {getScriptLock: () => ({waitLock() {}, releaseLock() {}})},
+  ScriptApp: {
+    getProjectTriggers: () => triggers,
+    newTrigger(name) { return {timeBased() { return this; }, after(delay) {
+      this.delay = delay; return this;
+    }, create() { const trigger = {getHandlerFunction: () => name,
+      getUniqueId: () => String(triggers.length + 1), delay: this.delay};
+      triggers.push(trigger); return trigger; }}; },
+    deleteTrigger(trigger) { const index = triggers.indexOf(trigger); if (index >= 0) triggers.splice(index, 1); }
+  },
   Utilities: {
     computeDigest(_algorithm, input) { return [...crypto.createHash('sha256').update(input).digest()]; },
     DigestAlgorithm: {SHA_256: 'SHA_256'},
@@ -33,7 +43,12 @@ const context = {
   }
 };
 vm.createContext(context);
-vm.runInContext(fs.readFileSync(path.join(__dirname, '../appsscript/Code.gs'), 'utf8'), context);
+const testPairingCode = 'a'.repeat(32);
+const testPairingHash = crypto.createHash('sha256').update(testPairingCode).digest('hex');
+const source = fs.readFileSync(path.join(__dirname, '../appsscript/Code.gs'), 'utf8')
+  .replace(/const PRIORITY_PAIRING_HASH = '[a-f0-9]+';/,
+    `const PRIORITY_PAIRING_HASH = '${testPairingHash}';`);
+vm.runInContext(source, context);
 context.telegramApi = (method, payload) => {
   const result = method === 'sendMessage' ? {message_id: nextMessageId++} : true;
   calls.push({method, payload, result});
@@ -42,6 +57,16 @@ context.telegramApi = (method, payload) => {
 context.dispatchCheck = () => { dispatches++; };
 const messages = () => calls.filter(x => x.method === 'sendMessage');
 const edits = () => calls.filter(x => x.method === 'editMessageText');
+context.handleTelegram({update_id: 1, message: {chat: {id: 101, type: 'private'},
+  text: '/priority ' + testPairingCode}}, props);
+assert.equal(values.PRIORITY_CHAT_ID, '101', 'pairing binds priority to the requesting chat');
+assert.match(messages()[0].payload.text, /Приоритетные уведомления включены/);
+calls.length = 0;
+context.handleTelegram({update_id: 2, message: {chat: {id: 999, type: 'private'},
+  text: '/priority ' + testPairingCode}}, props);
+assert.equal(values.PRIORITY_CHAT_ID, '101', 'a second chat cannot replace the owner');
+assert.match(messages()[0].payload.text, /Не удалось включить приоритет/);
+calls.length = 0;
 const now = new Date();
 const checkedAt = seconds => new Date(now.getTime() + seconds * 1000).toISOString();
 const base = {
@@ -56,9 +81,19 @@ const base = {
   }
 };
 
-// First scheduled result goes to a subscriber once, with separate sources.
+function releaseDelayed() {
+  const queued = JSON.parse(values.PRIORITY_PENDING);
+  assert(queued.dueAt >= queued.sentAt + 60 * 60 * 1000);
+  queued.dueAt = Date.now() - 1;
+  values.PRIORITY_PENDING = JSON.stringify(queued);
+  context.deliverDelayedBroadcast({triggerUid: triggers[0].getUniqueId()});
+}
+
+// First scheduled result goes to the priority subscriber immediately.
 context.handleWorkflow(base, props);
 assert.equal(messages().length, 1);
+assert.equal(messages()[0].payload.chat_id, '101');
+assert.equal(triggers.length, 1);
 assert.match(messages()[0].payload.text, /^Свободные слоты к психологам/);
 assert.doesNotMatch(messages()[0].payload.text, /^CU CareSlot/);
 assert.match(messages()[0].payload.text, /16 ноября 2030 — 11:15, 14:00/);
@@ -69,6 +104,12 @@ assert.equal(mainButtons[2][0].text, 'Страница Лилии');
 assert.equal(mainButtons[3][0].callback_data, 'help');
 assert.equal(mainButtons.flat().some(button => ['svetlana', 'lilia'].includes(button.callback_data)), false);
 assert.equal(calls.filter(x => x.method === 'setMyCommands').length, 1);
+calls.length = 0;
+context.deliverDelayedBroadcast({triggerUid: triggers[0].getUniqueId()});
+assert.equal(messages().length, 0, 'other users receive nothing before the full hour');
+assert.equal(triggers.length, 1, 'an early trigger is rescheduled');
+releaseDelayed();
+assert.equal(triggers.length, 0);
 calls.length = 0;
 context.handleWorkflow(base, props);
 assert.equal(calls.length, 0, 'duplicate workflow result stays quiet');
@@ -139,8 +180,11 @@ assert.doesNotMatch(edits()[0].payload.text, /Проверяю страницы/
 // A scheduled check broadcasts the change found by a manual check, once.
 calls.length = 0;
 context.handleWorkflow({...changed, checked_at: checkedAt(3), source: 'schedule'}, props);
-assert.equal(messages().length, 2, 'scheduled change reaches both subscribers');
-assert.deepEqual(messages().map(x => x.payload.chat_id).sort(), ['101', '303']);
+assert.equal(messages().length, 1, 'scheduled change first reaches only the owner');
+assert.equal(messages()[0].payload.chat_id, '101');
+calls.length = 0;
+releaseDelayed();
+assert.deepEqual(messages().map(x => x.payload.chat_id), ['303']);
 calls.length = 0;
 context.handleWorkflow({...changed, checked_at: checkedAt(4), source: 'schedule'}, props);
 assert.equal(messages().length, 0, 'unchanged scheduled result stays quiet');
@@ -152,7 +196,11 @@ const changedAgain = {...changed, checked_at: checkedAt(5), source: undefined, e
 context.handleWorkflow(changedAgain, props);
 assert.equal(messages().length, 0, 'unclassified check cannot broadcast');
 context.handleWorkflow({...changedAgain, checked_at: checkedAt(6), source: 'schedule'}, props);
-assert.equal(messages().length, 2, 'next scheduled check delivers the missed change once');
+assert.equal(messages().length, 1, 'next scheduled check first delivers to the owner');
+assert.equal(messages()[0].payload.chat_id, '101');
+calls.length = 0;
+releaseDelayed();
+assert.deepEqual(messages().map(x => x.payload.chat_id), ['303']);
 
 // Simulate a broadcast to 700 subscribers without sending real Telegram messages.
 values.BOT_TOKEN = 'test-token';

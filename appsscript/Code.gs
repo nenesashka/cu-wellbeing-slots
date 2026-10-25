@@ -2,6 +2,8 @@
 const GITHUB_DISPATCH_URL = 'https://api.github.com/repos/nenesashka/cu-wellbeing-slots/actions/workflows/check.yml/dispatches';
 const MOSCOW_TZ = 'Europe/Moscow';
 const BROADCAST_BATCH_SIZE = 12;
+const PRIORITY_DELAY_MS = 60 * 60 * 1000;
+const PRIORITY_PAIRING_HASH = 'c387ea139e611b670ea74a211ba8d73d4a7e990feaae411c19235549a6fe2dd1';
 const EVENTS = [
   {key: 'svetlana', name: 'Светлана Шутькова', mode: 'очно · кабинет 406', url: 'https://cu-events.timepad.ru/event/3219855/'},
   {key: 'lilia', name: 'Лилия Павлова', mode: 'онлайн', url: 'https://cu-events.timepad.ru/event/3558805/'}
@@ -38,10 +40,11 @@ function handleTelegram(update, props) {
   const chatId = String(message.chat.id);
   if (!/^\d+$/.test(chatId)) return;
   const messageId = callback ? Number(message.message_id || 0) : 0;
+  const rawText = String(message.text || '').trim();
   const action = callback ? String(callback.data || '') :
-    String(message.text || '').trim().split(/\s+/)[0].split('@')[0];
+    rawText.split(/\s+/)[0].split('@')[0];
   const allowed = ['/start', '/check', '/help', '/stop', '/svetlana', '/lilia',
-    'check', 'check_svetlana', 'check_lilia', 'all', 'svetlana', 'lilia', 'help'];
+    '/priority', 'check', 'check_svetlana', 'check_lilia', 'all', 'svetlana', 'lilia', 'help'];
   const checkView = action === 'check_svetlana' ? 'svetlana' :
     action === 'check_lilia' ? 'lilia' : 'all';
   const isCheck = action === '/check' || action === 'check' ||
@@ -51,13 +54,23 @@ function handleTelegram(update, props) {
 
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
-  let state, dispatchNeeded = false, requestCheck = false;
+  let state, dispatchNeeded = false, requestCheck = false, priorityActivated = false;
   try {
     const seen = JSON.parse(props.getProperty('RECENT_UPDATES') || '[]');
     const updateId = String(update.update_id);
     if (seen.indexOf(updateId) !== -1) return;
     seen.push(updateId);
     props.setProperty('RECENT_UPDATES', JSON.stringify(seen.slice(-180)));
+    if (action === '/priority') {
+      const code = rawText.match(/^\/priority\s+([a-f0-9]{32})$/i);
+      const currentOwner = props.getProperty('PRIORITY_CHAT_ID');
+      if (code && hashText(code[1].toLowerCase()) === PRIORITY_PAIRING_HASH &&
+          (!currentOwner || currentOwner === chatId)) {
+        props.setProperty('PRIORITY_CHAT_ID', chatId);
+        props.setProperty('SUB_' + chatId, '1');
+        priorityActivated = true;
+      }
+    }
     if (action === '/start') props.setProperty('SUB_' + chatId, '1');
     if (action === '/stop') {
       props.deleteProperty('SUB_' + chatId);
@@ -91,6 +104,14 @@ function handleTelegram(update, props) {
     return;
   }
 
+  if (action === '/priority') {
+    sendTelegram(chatId, priorityActivated ?
+      'Приоритетные уведомления включены. При изменении слотов я напишу тебе первым; общая рассылка начнётся не раньше чем через час.' :
+      'Не удалось включить приоритет. Проверь команду и код.', menuKeyboard());
+    if (priorityActivated) startPriorityDelivery(props);
+    return;
+  }
+
   if (action === '/stop') {
     sendTelegram(chatId, 'Уведомления отключены. Проверять слоты вручную можно командой /check. Чтобы снова подписаться, отправьте /start.', menuKeyboard());
   } else if (action === '/help') {
@@ -103,6 +124,7 @@ function handleTelegram(update, props) {
       try { dispatchCheck(props); }
       catch (error) { failDispatch(props); }
     }
+    if (props.getProperty('PRIORITY_CHAT_ID') === chatId) startPriorityDelivery(props);
   } else if (action === '/svetlana' || action === '/lilia') {
     const view = viewMessage(action.slice(1), state);
     sendTelegram(chatId, view.text, view.keyboard);
@@ -178,13 +200,11 @@ function handleWorkflow(payload, props) {
   const result = validateResult(payload);
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
-  let subscribers, pending, broadcastChanged = false, state;
+  let pending, broadcastChanged = false, state;
   try {
     const previousResult = props.getProperty('LAST_WORKFLOW_CHECKED_AT') || '';
     if (previousResult && Date.parse(result.checkedAt) <= Date.parse(previousResult)) return;
     const all = props.getProperties();
-    subscribers = Object.keys(all).filter(function(key) { return /^SUB_\d+$/.test(key); })
-      .map(function(key) { return key.slice(4); });
     pending = Object.keys(all).filter(function(key) { return /^PEND_\d+$/.test(key); })
       .map(function(key) { return readPending(all[key], key.slice(5)); });
     EVENTS.forEach(function(event) {
@@ -217,15 +237,16 @@ function handleWorkflow(payload, props) {
     props.setProperty('IN_FLIGHT', '0');
     props.setProperty('LAST_WORKFLOW_CHECKED_AT', result.checkedAt);
     state = readState(props);
+    if (result.source === 'schedule' && broadcastChanged) {
+      props.setProperty('PRIORITY_PENDING', JSON.stringify({
+        report: formatReport(state), checkedAt: result.checkedAt, sentAt: 0, dueAt: 0
+      }));
+    }
   } finally {
     lock.releaseLock();
   }
   if (result.source === 'schedule' && broadcastChanged) {
-    const report = formatReport(state);
-    const pendingIds = pending.filter(function(item) { return item.view !== 'help'; })
-      .map(function(item) { return item.chatId; });
-    broadcastTelegram(subscribers.filter(function(chatId) { return pendingIds.indexOf(chatId) < 0; }),
-      report, menuKeyboard());
+    startPriorityDelivery(props);
   }
   pending.forEach(function(item) { deliverPending(item, state); });
   maybeConfigureBotProfile(props);
@@ -239,6 +260,96 @@ function deliverPending(item, state) {
   } else {
     safeSend(item.chatId, view.text, view.keyboard);
   }
+}
+
+function startPriorityDelivery(props) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  let owner, queued;
+  try {
+    owner = props.getProperty('PRIORITY_CHAT_ID');
+    const raw = props.getProperty('PRIORITY_PENDING');
+    if (!owner || !props.getProperty('SUB_' + owner) || !raw) return;
+    queued = JSON.parse(raw);
+    if (queued.sentAt === -1) {
+      if (Date.now() - Number(queued.claimedAt || 0) < 60000) return;
+      queued.sentAt = 0;
+    }
+    if (queued.sentAt) {
+      if (queued.dueAt) ensureDelayedTrigger(queued.dueAt);
+      return;
+    }
+    queued.sentAt = -1; // Reserve this report so concurrent callbacks cannot send it twice.
+    queued.claimedAt = Date.now();
+    props.setProperty('PRIORITY_PENDING', JSON.stringify(queued));
+  } finally { lock.releaseLock(); }
+
+  try {
+    sendTelegram(owner, queued.report, menuKeyboard());
+  } catch (error) {
+    console.error('Priority delivery error: ' + String(error.status || error.name || 'Error'));
+    lock.waitLock(20000);
+    try {
+      const current = JSON.parse(props.getProperty('PRIORITY_PENDING') || '{}');
+      if (current.checkedAt === queued.checkedAt) {
+        current.sentAt = 0;
+        props.setProperty('PRIORITY_PENDING', JSON.stringify(current));
+      }
+    } finally { lock.releaseLock(); }
+    return;
+  }
+
+  const sentAt = Date.now();
+  const dueAt = sentAt + PRIORITY_DELAY_MS;
+  lock.waitLock(20000);
+  try {
+    const current = JSON.parse(props.getProperty('PRIORITY_PENDING') || '{}');
+    if (current.checkedAt !== queued.checkedAt) return;
+    current.sentAt = sentAt;
+    current.dueAt = dueAt;
+    props.setProperty('PRIORITY_PENDING', JSON.stringify(current));
+  } finally { lock.releaseLock(); }
+  ensureDelayedTrigger(dueAt);
+}
+
+function ensureDelayedTrigger(dueAt) {
+  try {
+    if (ScriptApp.getProjectTriggers().some(function(trigger) {
+      return trigger.getHandlerFunction() === 'deliverDelayedBroadcast';
+    })) return;
+    ScriptApp.newTrigger('deliverDelayedBroadcast').timeBased()
+      .after(Math.max(60000, dueAt - Date.now())).create();
+  } catch (error) {
+    console.error('Delayed trigger error: ' + String(error.name || 'Error'));
+  }
+}
+
+function deliverDelayedBroadcast(e) {
+  const props = PropertiesService.getScriptProperties();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  let queued, owner, subscribers, earlyDueAt = 0;
+  try {
+    const raw = props.getProperty('PRIORITY_PENDING');
+    if (raw) {
+      queued = JSON.parse(raw);
+      if (!queued.dueAt) queued = null;
+    }
+    if (queued && Date.now() < queued.dueAt) {
+      earlyDueAt = queued.dueAt;
+      queued = null;
+    } else if (queued) {
+      owner = props.getProperty('PRIORITY_CHAT_ID');
+      subscribers = Object.keys(props.getProperties()).filter(function(key) { return /^SUB_\d+$/.test(key); })
+        .map(function(key) { return key.slice(4); }).filter(function(chatId) { return chatId !== owner; });
+      props.deleteProperty('PRIORITY_PENDING');
+    }
+  } finally { lock.releaseLock(); }
+  if (e && e.triggerUid) ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    if (String(trigger.getUniqueId()) === String(e.triggerUid)) ScriptApp.deleteTrigger(trigger);
+  });
+  if (earlyDueAt) { ensureDelayedTrigger(earlyDueAt); return; }
+  if (queued) broadcastTelegram(subscribers, queued.report, menuKeyboard());
 }
 
 function readState(props) {
@@ -525,6 +636,11 @@ function writeSlots(props, eventKey, slots) {
 function hashSlots(slots) {
   const input = slots.map(function(slot) { return slot.id + ':' + slot.start; }).join('|');
   return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, input)
+    .map(function(byte) { return ('0' + (byte & 255).toString(16)).slice(-2); }).join('');
+}
+
+function hashText(value) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, value)
     .map(function(byte) { return ('0' + (byte & 255).toString(16)).slice(-2); }).join('');
 }
 
